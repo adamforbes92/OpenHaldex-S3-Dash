@@ -125,6 +125,27 @@ It is the only handler that calls `otaNoteWebActivity()`. The C6 drops its
 access point after ~5 minutes without it. The settings page clamps
 `pollDashMs` to 250..2000 ms for exactly this reason.
 
+### Joining the C6's access point
+
+The C6 publishes an **open** access point (`wifiPassword` defaults to `""`),
+so two defaults in the Arduino core have to be worked around:
+
+* `WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK)` is the core's default, i.e. an
+  open network is *below* the threshold. The station therefore has to be told
+  `WIFI_AUTH_OPEN` before `WiFi.begin()`.
+* Association and DHCP are separate problems. This board associates fine and
+  then never gets a lease, which looks identical to "AP is dead" from
+  outside. The reason is that the C6 is usually *also* on a home LAN that
+  already uses `192.168.1.0/24` (its softAP and its station interface then
+  share a subnet), so its DHCP server cannot hand out an address that looks
+  free. The firmware logs `associated but no DHCP lease` and retries with a
+  static address derived from the configured host (`192.168.1.203`), which
+  skips DHCP completely. This also suits a fixed install: the dash talks to
+  one AP at one address, so there is nothing for DHCP to decide.
+
+To tell the two failure modes apart, the join loop prints the BSSID, channel
+and RSSI, which only read back once the station is associated.
+
 ### Connection reuse
 
 Both pollers use `HTTPClient::setReuse(true)`, so 10 requests/second share
@@ -259,8 +280,51 @@ been reworked or is a different revision:
 |---|---|
 | Colours swapped (red shows as blue) | build with `-DDASH_USE_50_PINMAP=1`, or permute `kDataPins` |
 | Image shifted / wrapped | `LCD_HSYNC_*` / `LCD_VSYNC_*` porches in `board_config.h` |
-| Flicker | lower `LCD_PCLK_HZ` (24 MHz -> 16 MHz) |
+| Whole image jitters / shifts | panel DMA starved of PSRAM bandwidth: raise `LCD_BOUNCE_LINES`, then lower `LCD_PCLK_HZ` |
+| Image tears or rolls | LVGL is drawing into the buffer being scanned: keep `LCD_USE_DOUBLE_FB 1` and `LV_DISPLAY_RENDER_MODE_DIRECT` |
 | Panel blank, no backlight | `PCA9557` not found — check the I2C scan line in the boot log |
+
+### Why two frame buffers, and why DIRECT mode
+
+LVGL renders into one full-screen PSRAM buffer while the RGB peripheral scans
+the other, and `esp_lcd_panel_draw_bitmap()` only returns once the swap has
+happened at a frame boundary — so a frame is never half old and half new.
+
+The render mode that pairs with it is **DIRECT** (a full-screen buffer, but
+only the invalidated rectangles are drawn). `LV_DISPLAY_RENDER_MODE_FULL`
+looks tempting but forces a whole 800x480 render *and* the same 768 KB of
+PSRAM traffic every frame, which both wastes the CPU and starves the panel.
+
+The panel then reads ~41 MB/s out of PSRAM continuously (800x480x16 bpp at
+49 Hz) while the CPU needs the same memory for LVGL and WiFi. When the DMA's
+prefetch falls behind, the peripheral loses sync with the DMA and the whole
+picture shifts; Espressif ships `esp_lcd_rgb_panel_restart()` for it and
+`CONFIG_LCD_RGB_RESTART_IN_VSYNC` is enabled in this build, which turns a
+permanent shift into a jitter. `LCD_BOUNCE_LINES` is the margin against that:
+the driver refills an internal-SRAM bounce buffer from PSRAM in bursts, and
+the deeper it is the longer a WiFi burst can go on without emptying it. Two
+of them are allocated, so 16 lines costs 2 x 25 600 B.
+
+The pixel clock is taken from **PLL_D2 (240 MHz)**, which divides to 24 MHz by
+an exact 10. On `PLL_F160M` the same 24 MHz needs the fractional divider
+6 + 2/3; the exact divider removes any clock jitter from the picture. The
+source is printed at boot, and `p` on the serial console steps the clock down
+24 -> 20 -> 16 -> 12 MHz at runtime to test the bandwidth theory live.
+
+### Serial console
+
+115200 baud on UART0 (the CH340). Besides the boot banner:
+
+| Key | Effect |
+|---|---|
+| `1`..`6` | toggle redraw groups: arcs, needle, ticks, digits, readouts, status bar |
+| `0` / `9` | all on / all off |
+| `p` | step the pixel clock down one notch |
+| `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
+
+`d` is the bench substitute for a camera: `tools/serial_cmd.py d 34` shows
+what is on the glass, which is how the stale overlay and the layout were
+verified without a screen in front of you.
 
 Geometry (ring radius, tick spacing, tile widths) is all derived in
 `include/theme.h` from the same formulas as `dash.html`, so it is adjusted
@@ -317,15 +381,16 @@ src/
 | Panel pin map confirmed against the board | **done** — the factory image contains the exact 16-byte pin array at `0x1f0240` (see §8) |
 | Factory firmware backed up | **done** — 4 MB, sha256 recorded (§5) |
 | Firmware builds clean | **done** — see numbers below |
-| Panel / touch bring-up | **not yet run — requires flashing** |
-| Link to a live C6 | **not yet run** |
+| Panel / touch bring-up | **done** — RGB panel, GT911 and the PCA9557 all come up |
+| Link to a live C6 | **done** — `/api/live` at 10 Hz and `/api/dashboard` at 1 Hz, `live 57 ok / 2 fail` over 30 s |
+| Tearing / jitter fixed | **changed** — two frame buffers + DIRECT mode, exact 24 MHz divider, deeper bounce buffer; awaiting a visual re-check |
 | On-car test | not yet |
 
 Build result:
 
 ```
-RAM:   152 556 / 327 680 B   (46.6%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 602 762 / 1 966 080 B (81.5%) <- of the 1.875 MB OTA slot
+RAM:   152 684 / 327 680 B   (46.6%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 616 438 / 1 966 080 B (82.2%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly

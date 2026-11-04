@@ -19,3 +19,6 @@ include/wifi_secrets.h
 # --- generated
 compile_commands.json
 *.o
+
+# frame dumps / analysis stills derived from bench videos
+.shots/

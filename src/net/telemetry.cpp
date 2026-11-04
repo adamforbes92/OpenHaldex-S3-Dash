@@ -50,6 +50,41 @@ int intOrMinus1(JsonVariantConst v) {
 // ------------------------------------------------------------- WiFi link
 void wifiDisconnect() { WiFi.disconnect(true, false); }
 
+// Last octet of the address used when the access point never leases one.
+// High enough to stay clear of the DHCP pool's usual .2 ... .10 range.
+constexpr uint8_t kStaticLastOctet = 203;
+
+// Association state. BSSID/channel/RSSI only read back once the station is
+// associated, so these tell "on the radio but no address" apart from "never
+// got near the AP".
+bool wifiAssociated() { return WiFi.channel() != 0; }
+uint32_t wifiIp() { return (uint32_t)WiFi.localIP(); }
+
+// The core reports WL_CONNECTED on GOT_IP; with a static address the netif
+// can be up before that event, so both are accepted.
+bool wifiLinkUp() { return WiFi.status() == WL_CONNECTED || (wifiAssociated() && wifiIp() != 0); }
+
+// Wait for an address, reporting what the station is doing every 2 s.
+bool waitForJoin(uint32_t timeoutMs) {
+  static const char *const kStatus[] = {"IDLE",         "NO_SSID_AVAIL", "SCAN_COMPLETED",
+                                        "CONNECTED",    "CONNECT_FAILED", "CONNECTION_LOST",
+                                        "DISCONNECTED", "STOPPED"};
+  const uint32_t deadline = millis() + timeoutMs;
+  uint32_t lastLog = 0;
+  while (!wifiLinkUp() && (int32_t)(millis() - deadline) < 0) {
+    if ((uint32_t)(millis() - lastLog) >= 2000) {
+      lastLog = millis();
+      const int st = (int)WiFi.status();
+      Serial.printf("[net]   status %d (%s) bssid=%s ch=%d rssi=%d ip=%s\n", st,
+                    (st >= 0 && st <= 7) ? kStatus[st] : "?", WiFi.BSSIDstr().c_str(),
+                    (int)WiFi.channel(), (int)WiFi.RSSI(),
+                    WiFi.localIP().toString().c_str());
+    }
+    delay(50);
+  }
+  return wifiLinkUp();
+}
+
 bool wifiEnsureConnected() {
   static uint32_t lastAttempt = 0;
   static uint32_t lastRevision = 0;
@@ -57,7 +92,7 @@ bool wifiEnsureConnected() {
   const uint32_t rev = cfg::revision();
   const bool revisionChanged = (rev != lastRevision);
 
-  if (WiFi.status() == WL_CONNECTED && !revisionChanged) return true;
+  if (wifiLinkUp() && !revisionChanged) return true;
 
   const uint32_t now = millis();
   if (!revisionChanged && lastAttempt != 0 && (uint32_t)(now - lastAttempt) < 10000) {
@@ -80,24 +115,67 @@ bool wifiEnsureConnected() {
   WiFi.setSleep(false);  // 10 Hz polling: latency beats power saving here
   wifiDisconnect();
 
-  Serial.printf("[net] joining \"%s\" (password %s)\n", ssid, pass[0] ? "set" : "empty");
-  WiFi.begin(ssid, pass);
+  // The OpenHaldex-C6 access point is open by default. The core's default
+  // minimum security can refuse an open network outright, which looks
+  // exactly like "wrong password" from the outside.
+  if (pass[0] == '\0') {
+    WiFi.setMinSecurity(WIFI_AUTH_OPEN);
+  }
 
-  const uint32_t deadline = millis() + 15000;
-  while (WiFi.status() != WL_CONNECTED && (int32_t)(millis() - deadline) < 0) {
-    delay(50);
+  Serial.printf("[net] joining \"%s\" (password %s)\n", ssid, pass[0] ? "set" : "empty");
+  WiFi.begin(ssid, pass[0] ? pass : nullptr);
+
+  bool up = waitForJoin(15000);
+
+  // Associated but never leased an address. That is what happens when the
+  // OpenHaldex-C6 is also sitting on a home LAN that already uses
+  // 192.168.1.0/24: its softAP DHCP server sees those addresses as taken and
+  // the lease never completes, while the association itself looks perfect.
+  // Falling back to a static address in the host's subnet skips DHCP
+  // entirely, which is also what a fixed install in a car wants.
+  if (!up && wifiAssociated()) {
+    IPAddress hostIp;
+    if (hostIp.fromString(host)) {
+      const IPAddress staticIp(hostIp[0], hostIp[1], hostIp[2], kStaticLastOctet);
+      Serial.printf("[net] associated but no DHCP lease - retrying with static %s\n",
+                    staticIp.toString().c_str());
+      if (WiFi.config(staticIp, hostIp, IPAddress(255, 255, 255, 0))) {
+        WiFi.disconnect();
+        delay(100);
+        WiFi.begin(ssid, pass[0] ? pass : nullptr);
+        up = waitForJoin(8000);
+      } else {
+        Serial.println("[net] WiFi.config() refused the static address");
+      }
+    } else {
+      Serial.printf("[net] cannot derive a static address from host \"%s\"\n", host);
+    }
   }
 
   taskENTER_CRITICAL(&g_mux);
   g_stats.reconnects++;
   taskEXIT_CRITICAL(&g_mux);
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[net] join FAILED - will retry");
+  if (!up) {
+    const int st = (int)WiFi.status();
+    Serial.printf("[net] join FAILED (status %d), retrying in 10 s\n", st);
+    // Walking the channel list by hand finds an AP that the fast scan missed.
+    const int n = WiFi.scanNetworks();
+    if (n > 0) {
+      Serial.printf("[net] %d AP(s) visible:", n);
+      for (int i = 0; i < n && i < 6; i++) {
+        Serial.printf(" [%s ch%d %ddBm]", WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
+      }
+      Serial.println();
+    } else {
+      Serial.printf("[net] no APs visible at all (scan returned %d)\n", n);
+    }
+    WiFi.scanDelete();
     return false;
   }
 
-  Serial.printf("[net] connected: ip %s rssi %d dBm\n", WiFi.localIP().toString().c_str(),
+  Serial.printf("[net] connected: ip %s gateway %s rssi %d dBm\n",
+                WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
                 (int)WiFi.RSSI());
 
   // Registering mDNS lets "openhaldex.local" resolve wherever the C6 is

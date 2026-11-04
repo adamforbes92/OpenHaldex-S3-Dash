@@ -3,7 +3,7 @@
 //
 // Owns everything below the UI:
 //   * I2C bus + PCA9557 expander (LCD panel reset)
-//   * LovyanGFX RGB panel driver with two PSRAM frame buffers
+//   * esp_lcd RGB panel driver with two PSRAM frame buffers
 //   * LVGL display + pointer input registered straight onto those buffers
 //   * backlight and the spare GPIO38 output
 // =====================================================================
@@ -27,6 +27,27 @@ void auxWrite(bool on);
 
 /// Free PSRAM in bytes, for the boot banner.
 uint32_t psramFree();
+
+/// Microseconds spent inside the LVGL flush callback since the last call,
+/// then resets the counter. Used to tell "LVGL is slow" apart from
+/// "handing the frame to the panel is slow".
+uint32_t takeFlushMicros();
+
+/// Live PCLK of the RGB peripheral, its source, and the refresh rate that
+/// follows from the porch values, for logging.
+uint32_t pclkHz();
+uint32_t refreshHzNow();
+const char *clkSrcName();
+
+/// Change the pixel clock at runtime (applied by the driver at the next
+/// VSYNC). The panel's PSRAM read bandwidth scales with it, so this is the
+/// handle for chasing DMA starvation without a reflash. 5..30 MHz.
+bool setPclk(uint32_t hz);
+
+/// Print the frame buffer the panel is currently scanning as an ASCII
+/// luminance map (cols x rows cells). Bench aid: it shows what the screen
+/// really contains, without a camera.
+void dumpFrame(int cols, int rows);
 
 /// Static description of what came up, for logging.
 struct Status {

@@ -76,6 +76,13 @@ struct {
 } g_peaks;
 
 bool g_flashOn = false;
+
+// 0xFFFF = draw everything (see dash_ui.h).
+uint16_t g_dbgMask = 0xFFFF;
+bool dbg(uint16_t bit) { return (g_dbgMask & bit) != 0; }
+
+uint32_t g_tachUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
+bool g_dbgHideAll = false;
 uint32_t g_lastFlashMs = 0;
 uint32_t g_lastTickMs = 0;
 bool g_settingsOpen = false;
@@ -96,7 +103,30 @@ void setText(lv_obj_t *label, const char *text) {
   if (!cur || strcmp(cur, text) != 0) lv_label_set_text(label, text);
 }
 
-void setTextColor(lv_obj_t *label, lv_color_t c) { lv_obj_set_style_text_color(label, c, 0); }
+bool sameColor(lv_color_t a, lv_color_t b) {
+  return a.red == b.red && a.green == b.green && a.blue == b.blue;
+}
+
+// Setting a style always invalidates the object, even when the value is
+// identical. On a 30 Hz dashboard that is pure repaint cost, so every style
+// write goes through one of these guards.
+void setTextColor(lv_obj_t *label, lv_color_t c) {
+  if (!sameColor(lv_obj_get_style_text_color(label, 0), c)) {
+    lv_obj_set_style_text_color(label, c, 0);
+  }
+}
+
+void setBgColor(lv_obj_t *obj, lv_color_t c, lv_style_selector_t sel) {
+  if (!sameColor(lv_obj_get_style_bg_color(obj, sel), c)) {
+    lv_obj_set_style_bg_color(obj, c, sel);
+  }
+}
+
+void setBorderColor(lv_obj_t *obj, lv_color_t c) {
+  if (!sameColor(lv_obj_get_style_border_color(obj, 0), c)) {
+    lv_obj_set_style_border_color(obj, c, 0);
+  }
+}
 
 void setBar(lv_obj_t *bar, int32_t value) {
   if (lv_bar_get_value(bar) != value) lv_bar_set_value(bar, value, LV_ANIM_OFF);
@@ -119,6 +149,15 @@ lv_obj_t *plain(lv_obj_t *parent, int x, int y, int width, int height) {
   return o;
 }
 
+// Like plain() but paints its own background, so a repaint stays inside the
+// container instead of reaching back to whatever is underneath.
+lv_obj_t *opaque(lv_obj_t *parent, int x, int y, int width, int height, lv_color_t bg) {
+  lv_obj_t *o = plain(parent, x, y, width, height);
+  lv_obj_set_style_bg_color(o, bg, 0);
+  lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+  return o;
+}
+
 lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, const char *text) {
   lv_obj_t *l = lv_label_create(parent);
   lv_obj_remove_flag(l, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
@@ -137,6 +176,19 @@ lv_obj_t *boxedLabel(lv_obj_t *parent, int cx, int cy, int boxW, int boxH,
   lv_obj_set_pos(l, cx - boxW / 2, cy - boxH / 2);
   lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_pad_all(l, 0, 0);
+  return l;
+}
+
+// Dynamic text must never use LV_SIZE_CONTENT: a changing self-size marks
+// the layout dirty, and LVGL then repaints the whole parent tile. Every
+// label whose text changes gets a fixed box instead.
+lv_obj_t *fixedLabel(lv_obj_t *parent, int x, int y, int w, int h, const lv_font_t *font,
+                     lv_color_t color, const char *text) {
+  lv_obj_t *l = label(parent, font, color, text);
+  lv_obj_set_size(l, w, h);
+  lv_obj_set_pos(l, x, y);
+  lv_label_set_long_mode(l, LV_LABEL_LONG_CLIP);
+  lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_LEFT, 0);
   return l;
 }
 
@@ -189,13 +241,39 @@ lv_obj_t *lamp(lv_obj_t *parent, int x, int y, int width, const char *text) {
   return l;
 }
 
+// Called every frame for five lamps; keep the previous state so an
+// unchanged lamp costs nothing at all.
+struct LampState {
+  lv_obj_t *obj = nullptr;
+  bool on = false;
+  bool red = false;
+  bool valid = false;
+};
+LampState g_lampState[6];
+
 void lampState(lv_obj_t *l, bool on, bool red) {
-  lv_color_t bg = red ? COL_RED : COL_AMBER;
-  lv_obj_set_style_bg_color(l, on ? bg : COL_LAMP_OFF, 0);
-  lv_obj_set_style_border_color(l, on ? bg : COL_LAMP_EDGE, 0);
-  lv_obj_set_style_text_color(l, on ? (red ? lv_color_white() : lv_color_black())
-                                    : COL_LAMP_TXT_OFF,
-                              0);
+  LampState *st = nullptr;
+  for (LampState &c : g_lampState) {
+    if (c.obj == l) {
+      st = &c;
+      break;
+    }
+    if (c.obj == nullptr) {
+      c.obj = l;
+      st = &c;
+      break;
+    }
+  }
+  if (!st) return;
+  if (st->valid && st->on == on && st->red == red) return;
+  st->on = on;
+  st->red = red;
+  st->valid = true;
+
+  const lv_color_t bg = red ? COL_RED : COL_AMBER;
+  setBgColor(l, on ? bg : COL_LAMP_OFF, 0);
+  setBorderColor(l, on ? bg : COL_LAMP_EDGE);
+  setTextColor(l, on ? (red ? lv_color_white() : lv_color_black()) : COL_LAMP_TXT_OFF);
 }
 
 // ------------------------------------------------------------ tach ring
@@ -220,7 +298,7 @@ void styleArc(lv_obj_t *arc, lv_color_t dim, lv_color_t lit) {
 }
 
 void buildTach(lv_obj_t *parent) {
-  w.tach = plain(parent, 0, 0, L::W, L::TOP_H);
+  w.tach = opaque(parent, 0, 0, L::W, L::TOP_H, COL_BG);
 
   // Zones, as fractions of rpmMax. Recomputed whenever the config changes.
   const cfg::Data &c = cfg::get();
@@ -256,15 +334,26 @@ void buildTach(lv_obj_t *parent) {
     const float a = angFor(f);
     const float ca = cosf(a), sa = sinf(a);
 
+    // A line object must be no bigger than the line itself: LVGL
+    // invalidates the object's box, so an 800x252 box here would repaint
+    // half the screen whenever anything near the ring changes.
     w.tickLine[i] = lv_line_create(w.tach);
     lv_obj_remove_style_all(w.tickLine[i]);
-    lv_obj_set_pos(w.tickLine[i], 0, 0);
-    lv_obj_set_size(w.tickLine[i], L::W, L::TOP_H);
     static lv_point_precise_t tickPts[9][2];  // one array per tick, never freed
-    tickPts[i][0].x = L::TACH_CX + ca * L::TICK_R_IN;
-    tickPts[i][0].y = L::TACH_CY + sa * L::TICK_R_IN;
-    tickPts[i][1].x = L::TACH_CX + ca * L::TICK_R_OUT;
-    tickPts[i][1].y = L::TACH_CY + sa * L::TICK_R_OUT;
+    const float x0 = L::TACH_CX + ca * L::TICK_R_IN;
+    const float y0 = L::TACH_CY + sa * L::TICK_R_IN;
+    const float x1 = L::TACH_CX + ca * L::TICK_R_OUT;
+    const float y1 = L::TACH_CY + sa * L::TICK_R_OUT;
+    const int bx = (int)floorf(fminf(x0, x1)) - 2;
+    const int by = (int)floorf(fminf(y0, y1)) - 2;
+    const int bw = (int)ceilf(fabsf(x1 - x0)) + 4;
+    const int bh = (int)ceilf(fabsf(y1 - y0)) + 4;
+    lv_obj_set_pos(w.tickLine[i], bx, by);
+    lv_obj_set_size(w.tickLine[i], bw, bh);
+    tickPts[i][0].x = x0 - bx;
+    tickPts[i][0].y = y0 - by;
+    tickPts[i][1].x = x1 - bx;
+    tickPts[i][1].y = y1 - by;
     lv_line_set_points(w.tickLine[i], tickPts[i], 2);
     lv_obj_set_style_line_width(w.tickLine[i], 2, 0);
     lv_obj_set_style_line_color(w.tickLine[i], f >= 0.85f ? COL_RED : COL_LAMP_EDGE, 0);
@@ -276,29 +365,30 @@ void buildTach(lv_obj_t *parent) {
                                 COL_DIM, buf);
   }
 
-  // Needle, then hub on top of its centre.
+  // Needle, then hub on top of its centre. updateTach() moves its box to
+  // the tight bounding box of the two points every frame, so a sweep
+  // repaints ~130x130 px instead of the whole 800x252 tach band.
   w.needle = lv_line_create(w.tach);
   lv_obj_remove_style_all(w.needle);
-  lv_obj_set_pos(w.needle, 0, 0);
-  lv_obj_set_size(w.needle, L::W, L::TOP_H);
-  g_needlePts[0].x = L::TACH_CX;
-  g_needlePts[0].y = L::TACH_CY;
-  g_needlePts[1].x = L::TACH_CX;
-  g_needlePts[1].y = L::TACH_CY - L::NEEDLE_LEN;
+  lv_obj_set_pos(w.needle, L::TACH_CX, L::TACH_CY - L::NEEDLE_LEN);
+  lv_obj_set_size(w.needle, 3, L::NEEDLE_LEN);
+  g_needlePts[0].x = 0;
+  g_needlePts[0].y = L::NEEDLE_LEN;
+  g_needlePts[1].x = 0;
+  g_needlePts[1].y = 0;
   lv_line_set_points_mutable(w.needle, g_needlePts, 2);
   lv_obj_set_style_line_width(w.needle, 3, 0);
   lv_obj_set_style_line_color(w.needle, COL_WHITE, 0);
   lv_obj_set_style_line_rounded(w.needle, true, 0);
 
-  w.hub = plain(w.tach, L::TACH_CX - L::HUB_R, L::TACH_CY - L::HUB_R, 2 * L::HUB_R,
-                2 * L::HUB_R);
+  w.hub = opaque(w.tach, L::TACH_CX - L::HUB_R, L::TACH_CY - L::HUB_R, 2 * L::HUB_R,
+                 2 * L::HUB_R, COL_HUB);
   lv_obj_set_style_radius(w.hub, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(w.hub, COL_HUB, 0);
-  lv_obj_set_style_bg_opa(w.hub, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(w.hub, 2, 0);
   lv_obj_set_style_border_color(w.hub, COL_LAMP_EDGE, 0);
 
-  w.rpmDigits = boxedLabel(w.tach, L::TACH_CX, L::TACH_CY - (int)(L::TACH_R * 0.30f), 320, 60,
+  // The box is what gets repainted, so keep it just wider than "8000".
+  w.rpmDigits = boxedLabel(w.tach, L::TACH_CX, L::TACH_CY - (int)(L::TACH_R * 0.30f), 210, 60,
                            FONT_TACH, COL_FG, "--");
   boxedLabel(w.tach, L::TACH_CX, L::TACH_CY - (int)(L::TACH_R * 0.02f), 80, 24, FONT_RPM_LBL,
              COL_DIM, "RPM");
@@ -322,7 +412,7 @@ void buildTiles(lv_obj_t *parent) {
   const int h = L::BOTTOM_H;
 
   // ---- SPEED ------------------------------------------------------
-  lv_obj_t *t0 = plain(parent, L::COL0_X, y, L::COL0_W, h);
+  lv_obj_t *t0 = opaque(parent, L::COL0_X, y, L::COL0_W, h, COL_BG);
   lv_obj_set_style_border_side(t0, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t0, 1, 0);
   lv_obj_set_style_border_color(t0, COL_LINE, 0);
@@ -330,17 +420,15 @@ void buildTiles(lv_obj_t *parent) {
   lv_obj_t *cap = label(t0, FONT_CAP, COL_DIM, "SPEED");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.speedVal = label(t0, FONT_BIG, COL_FG, "--");
-  lv_obj_set_pos(w.speedVal, L::TILE_PAD_H - 2, 44);
+  w.speedVal = fixedLabel(t0, L::TILE_PAD_H - 2, 44, 132, 58, FONT_BIG, COL_FG, "--");
 
-  lv_obj_t *unit = label(t0, FONT_CAP, COL_DIM, "km/h");
-  lv_obj_set_pos(unit, L::TILE_PAD_H + 4, h - 44);
+  fixedLabel(t0, L::TILE_PAD_H + 4, h - 44, 60, 18, FONT_CAP, COL_DIM, "km/h");
 
-  w.speedPeak = label(t0, FONT_SMALL, COL_DIM, "peak --");
-  lv_obj_set_pos(w.speedPeak, L::TILE_PAD_H, h - 24);
+  w.speedPeak = fixedLabel(t0, L::TILE_PAD_H, h - 24, L::COL0_W - 2 * L::TILE_PAD_H, 18,
+                           FONT_SMALL, COL_DIM, "peak --");
 
   // ---- BOOST ------------------------------------------------------
-  lv_obj_t *t1 = plain(parent, L::COL1_X, y, L::COL1_W, h);
+  lv_obj_t *t1 = opaque(parent, L::COL1_X, y, L::COL1_W, h, COL_BG);
   lv_obj_set_style_border_side(t1, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t1, 1, 0);
   lv_obj_set_style_border_color(t1, COL_LINE, 0);
@@ -348,19 +436,17 @@ void buildTiles(lv_obj_t *parent) {
   cap = label(t1, FONT_CAP, COL_DIM, "BOOST");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.boostVal = label(t1, FONT_BIG, COL_FG, "--");
-  lv_obj_set_pos(w.boostVal, L::TILE_PAD_H - 2, 44);
+  w.boostVal = fixedLabel(t1, L::TILE_PAD_H - 2, 44, 140, 58, FONT_BIG, COL_FG, "--");
 
-  w.boostUnit = label(t1, FONT_CAP, COL_DIM, "bar");
-  lv_obj_set_pos(w.boostUnit, L::TILE_PAD_H + 4, h - 44);
+  w.boostUnit = fixedLabel(t1, L::TILE_PAD_H + 4, h - 44, 60, 18, FONT_CAP, COL_DIM, "bar");
 
   w.boostBar = bar(t1, L::TILE_PAD_H, h - 62, L::COL1_W - 2 * L::TILE_PAD_H, 9, COL_GREEN, 0,
                    100);
-  w.boostPeak = label(t1, FONT_SMALL, COL_DIM, "peak --");
-  lv_obj_set_pos(w.boostPeak, L::TILE_PAD_H, h - 24);
+  w.boostPeak = fixedLabel(t1, L::TILE_PAD_H, h - 24, L::COL1_W - 2 * L::TILE_PAD_H, 18,
+                           FONT_SMALL, COL_DIM, "peak --");
 
   // ---- TEMPERATURES -----------------------------------------------
-  lv_obj_t *t2 = plain(parent, L::COL2_X, y, L::COL2_W, h);
+  lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
   lv_obj_set_style_border_side(t2, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t2, 1, 0);
   lv_obj_set_style_border_color(t2, COL_LINE, 0);
@@ -371,37 +457,37 @@ void buildTiles(lv_obj_t *parent) {
   const int tw = L::COL2_W - 2 * L::TILE_PAD_H;
   lv_obj_t *cl = label(t2, FONT_CAP, COL_DIM, "COOLANT");
   lv_obj_set_pos(cl, L::TILE_PAD_H, 40);
-  w.coolVal = label(t2, FONT_TEMP, COL_FG, "--");
-  lv_obj_set_pos(w.coolVal, L::TILE_PAD_H + tw - 74, 32);
+  w.coolVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 30, 92, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_set_style_text_align(w.coolVal, LV_TEXT_ALIGN_RIGHT, 0);
   w.coolBar = bar(t2, L::TILE_PAD_H, 74, tw, 10, COL_GREEN, 0, 100);
 
   lv_obj_t *ol = label(t2, FONT_CAP, COL_DIM, "OIL");
   lv_obj_set_pos(ol, L::TILE_PAD_H, 104);
-  w.oilVal = label(t2, FONT_TEMP, COL_FG, "--");
-  lv_obj_set_pos(w.oilVal, L::TILE_PAD_H + tw - 74, 96);
+  w.oilVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 94, 92, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_set_style_text_align(w.oilVal, LV_TEXT_ALIGN_RIGHT, 0);
   w.oilBar = bar(t2, L::TILE_PAD_H, 138, tw, 10, COL_GREEN, 0, 100);
 
   // ---- HALDEX -----------------------------------------------------
-  lv_obj_t *t3 = plain(parent, L::COL3_X, y, L::COL3_W, h);
+  lv_obj_t *t3 = opaque(parent, L::COL3_X, y, L::COL3_W, h, COL_BG);
 
   cap = label(t3, FONT_CAP, COL_DIM, "HALDEX");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.modeVal = label(t3, FONT_MODE, COL_FG, "--");
-  lv_obj_set_pos(w.modeVal, L::TILE_PAD_H, 36);
+  w.modeVal = fixedLabel(t3, L::TILE_PAD_H, 36, L::COL3_W - 2 * L::TILE_PAD_H, 36, FONT_MODE,
+                         COL_FG, "--");
 
-  w.haldexSub = label(t3, FONT_SMALL, COL_DIM, "coupling --");
-  lv_obj_set_pos(w.haldexSub, L::TILE_PAD_H, 70);
+  w.haldexSub = fixedLabel(t3, L::TILE_PAD_H, 70, L::COL3_W - 2 * L::TILE_PAD_H, 20, FONT_SMALL,
+                           COL_DIM, "coupling --");
 
   lv_obj_t *lr = label(t3, FONT_CAP, COL_DIM, "LOCK REQ");
   lv_obj_set_pos(lr, L::TILE_PAD_H, 94);
-  w.lockReqVal = label(t3, FONT_TEMP, COL_FG, "--");
-  lv_obj_set_pos(w.lockReqVal, L::COL3_W - 70, 88);
+  w.lockReqVal = fixedLabel(t3, L::COL3_W - 110, 86, 100, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_set_style_text_align(w.lockReqVal, LV_TEXT_ALIGN_RIGHT, 0);
 
   lv_obj_t *la = label(t3, FONT_CAP, COL_DIM, "LOCK ACT");
   lv_obj_set_pos(la, L::TILE_PAD_H, 126);
-  w.lockActVal = label(t3, FONT_TEMP, COL_FG, "--");
-  lv_obj_set_pos(w.lockActVal, L::COL3_W - 70, 120);
+  w.lockActVal = fixedLabel(t3, L::COL3_W - 110, 118, 100, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_set_style_text_align(w.lockActVal, LV_TEXT_ALIGN_RIGHT, 0);
 
   lv_obj_t *thr = label(t3, FONT_CAP, COL_FG, "THR");
   lv_obj_set_pos(thr, L::TILE_PAD_H + 4, 160);
@@ -438,30 +524,29 @@ void buildStatusBar(lv_obj_t *parent) {
   lv_obj_set_style_bg_color(w.dot, COL_DIM, 0);
   lv_obj_set_style_bg_opa(w.dot, LV_OPA_COVER, 0);
 
-  w.connTxt = label(s, FONT_CAP, COL_DIM, "CONNECTING");
-  lv_obj_set_pos(w.connTxt, 26, 7);
+  // 92 px holds the widest state word ("CONNECTING") without resizing.
+  w.connTxt = fixedLabel(s, 26, 8, 62, 18, FONT_CAP, COL_DIM, "CONNECT");
 
   const int lampY = 5;
   w.lampBrake = lamp(s, 92, lampY, 50, "BRAKE");
-  w.lampHand = lamp(s, 146, lampY, 44, "HAND");
-  w.lampTc = lamp(s, 194, lampY, 32, "TC");
-  w.lampAsr = lamp(s, 230, lampY, 36, "ASR");
-  w.lampAwd = lamp(s, 270, lampY, 38, "AWD");
+  w.lampHand = lamp(s, 146, lampY, 50, "HAND");
+  w.lampTc = lamp(s, 200, lampY, 32, "TC");
+  w.lampAsr = lamp(s, 236, lampY, 40, "ASR");
+  w.lampAwd = lamp(s, 280, lampY, 42, "AWD");
 
-  w.peakTxt = label(s, FONT_CAP, COL_DIM, "");
-  lv_obj_set_pos(w.peakTxt, 316, 7);
+  w.peakTxt = fixedLabel(s, 316, 8, 200, 18, FONT_CAP, COL_DIM, "");
 
-  w.btnReset = button(s, 520, 3, 104, 24, "RESET PEAKS", onResetPeaks);
-  w.btnDay = button(s, 630, 3, 56, 24, "DAY", onToggleDay);
-  w.btnCfg = button(s, 692, 3, 100, 24, "SETTINGS", onOpenSettings);
+  w.btnReset = button(s, 516, 3, 104, 24, "RESET PEAKS", onResetPeaks);
+  w.btnDay = button(s, 626, 3, 56, 24, "DAY", onToggleDay);
+  w.btnCfg = button(s, 688, 3, 104, 24, "SETTINGS", onOpenSettings);
   w.dayLabel = lv_obj_get_child(w.btnDay, 0);
 }
 
 // ------------------------------------------------------------- overlay
 void buildStaleOverlay(lv_obj_t *parent) {
-  w.stale = plain(parent, 0, 0, L::W, L::TOP_H + L::BOTTOM_H);
-  lv_obj_set_style_bg_color(w.stale, lv_color_hex(0x0a0a0a), 0);
-  lv_obj_set_style_bg_opa(w.stale, 219, 0);  // rgba(10,10,10,0.86)
+  // Fully opaque: an alpha layer here would force a software blend of the
+  // whole 800x449 area on every frame while disconnected.
+  w.stale = opaque(parent, 0, 0, L::W, L::TOP_H + L::BOTTOM_H, lv_color_hex(0x0a0a0a));
   lv_obj_add_flag(w.stale, LV_OBJ_FLAG_HIDDEN);
 
   w.staleBig = label(w.stale, FONT_BIG, COL_DIM, "NO DATA");
@@ -762,6 +847,7 @@ const char *boostUnitText() {
 }
 
 void updateTach(const cfg::Data &c, float rpm, bool stale) {
+  if (!dbg(1) && !dbg(2) && !dbg(8)) return;
   const bool have = !stale && !isnan(rpm);
   const float frac = have ? (rpm / c.rpmMax) : 0.0f;
   const float fAmber = c.rpmAmber / c.rpmMax;
@@ -772,17 +858,40 @@ void updateTach(const cfg::Data &c, float rpm, bool stale) {
   const int redDeg = (int)(fRed * L::ARC_SWEEP_DEG);
 
   // Each zone shows only the part of the sweep it owns.
-  lv_arc_set_angles(w.arcGreen, 0, litDeg < amberDeg ? litDeg : amberDeg);
-  lv_arc_set_angles(w.arcAmber, amberDeg, litDeg > amberDeg ? (litDeg < redDeg ? litDeg : redDeg) : amberDeg);
-  lv_arc_set_angles(w.arcRed, redDeg, litDeg > redDeg ? litDeg : redDeg);
+  if (dbg(1)) {
+    lv_arc_set_angles(w.arcGreen, 0, litDeg < amberDeg ? litDeg : amberDeg);
+    lv_arc_set_angles(w.arcAmber, amberDeg,
+                      litDeg > amberDeg ? (litDeg < redDeg ? litDeg : redDeg) : amberDeg);
+    lv_arc_set_angles(w.arcRed, redDeg, litDeg > redDeg ? litDeg : redDeg);
+  }
 
-  // Needle.
-  const float a = angFor(have ? frac : 0.0f);
-  g_needlePts[0].x = L::TACH_CX - (int)(cosf(a) * L::NEEDLE_TAIL);
-  g_needlePts[0].y = L::TACH_CY - (int)(sinf(a) * L::NEEDLE_TAIL);
-  g_needlePts[1].x = L::TACH_CX + (int)(cosf(a) * L::NEEDLE_LEN);
-  g_needlePts[1].y = L::TACH_CY + (int)(sinf(a) * L::NEEDLE_LEN);
-  lv_obj_invalidate(w.needle);
+  // Needle. The line lives in a box that is moved onto the tight bounding
+  // box of its two points, so only the pixels the needle actually covers
+  // (plus its previous position) are repainted.
+  if (dbg(2)) {
+    const float a = angFor(have ? frac : 0.0f);
+    const float ax = L::TACH_CX - cosf(a) * L::NEEDLE_TAIL;
+    const float ay = L::TACH_CY - sinf(a) * L::NEEDLE_TAIL;
+    const float bx = L::TACH_CX + cosf(a) * L::NEEDLE_LEN;
+    const float by = L::TACH_CY + sinf(a) * L::NEEDLE_LEN;
+    const int half = 3;  // half the stroke width, plus a rounding margin
+    const int ox = (int)floorf(fminf(ax, bx)) - half;
+    const int oy = (int)floorf(fminf(ay, by)) - half;
+    const int ow = (int)ceilf(fabsf(bx - ax)) + 2 * half;
+    const int oh = (int)ceilf(fabsf(by - ay)) + 2 * half;
+
+    if (lv_obj_get_x(w.needle) != ox || lv_obj_get_y(w.needle) != oy) {
+      lv_obj_set_pos(w.needle, ox, oy);
+    }
+    if (lv_obj_get_width(w.needle) != ow || lv_obj_get_height(w.needle) != oh) {
+      lv_obj_set_size(w.needle, ow, oh);
+    }
+    g_needlePts[0].x = ax - ox;
+    g_needlePts[0].y = ay - oy;
+    g_needlePts[1].x = bx - ox;
+    g_needlePts[1].y = by - oy;
+    lv_obj_invalidate(w.needle);
+  }
 
   // Digits + shift lamp.
   const bool flash = have && (rpm >= c.rpmShift) && g_flashOn;
@@ -792,16 +901,18 @@ void updateTach(const cfg::Data &c, float rpm, bool stale) {
   } else {
     snprintf(buf, sizeof(buf), "--");
   }
-  setSuffix(w.rpmDigits, buf, flash ? COL_RED : COL_FG);
-
-  lv_obj_set_style_bg_color(w.shiftLamp, flash ? COL_RED : lv_color_hex(0x2a0f0f), 0);
-  lv_obj_set_style_border_color(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x481a1a), 0);
-  lv_obj_set_style_text_color(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x3a1414), 0);
+  if (dbg(8)) {
+    setSuffix(w.rpmDigits, buf, flash ? COL_RED : COL_FG);
+    setBgColor(w.shiftLamp, flash ? COL_RED : lv_color_hex(0x2a0f0f), 0);
+    setBorderColor(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x481a1a));
+    setTextColor(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x3a1414));
+  }
 }
 
 void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telemetry::Dash &d,
                     bool stale) {
   (void)live;  // only the interpolated copy is drawn
+  if (!dbg(16)) return;
   const Values v = stale ? kBlank : g_shown;
   char buf[32];
   char b2[32];
@@ -833,7 +944,7 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
       if (pct > 100) pct = 100;
     }
     setBar(w.boostBar, pct);
-    lv_obj_set_style_bg_color(w.boostBar, bcol, LV_PART_INDICATOR);
+    setBgColor(w.boostBar, bcol, LV_PART_INDICATOR);
   }
   if (isnan(g_peaks.boost)) {
     setText(w.boostPeak, "peak --");
@@ -854,8 +965,7 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
       if (pct > 100) pct = 100;
     }
     setBar(w.coolBar, pct);
-    lv_obj_set_style_bg_color(w.coolBar, colFor(v.coolant, c.coolWarn, c.coolCrit),
-                              LV_PART_INDICATOR);
+    setBgColor(w.coolBar, colFor(v.coolant, c.coolWarn, c.coolCrit), LV_PART_INDICATOR);
   }
 
   fmtTemp(buf, sizeof(buf), v.oil);
@@ -868,7 +978,7 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
       if (pct > 100) pct = 100;
     }
     setBar(w.oilBar, pct);
-    lv_obj_set_style_bg_color(w.oilBar, colFor(v.oil, c.oilWarn, c.oilCrit), LV_PART_INDICATOR);
+    setBgColor(w.oilBar, colFor(v.oil, c.oilWarn, c.oilCrit), LV_PART_INDICATOR);
   }
 
   // ---- haldex
@@ -919,20 +1029,21 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
 }
 
 void updateConn(bool stale) {
+  if (!dbg(32)) return;
   const telemetry::Stats s = telemetry::stats();
 
   if (!s.wifiUp) {
     setText(w.connTxt, "NO WIFI");
     setTextColor(w.connTxt, COL_RED);
-    lv_obj_set_style_bg_color(w.dot, COL_RED, 0);
+    setBgColor(w.dot, COL_RED, 0);
   } else if (stale) {
     setText(w.connTxt, "STALE");
     setTextColor(w.connTxt, COL_AMBER);
-    lv_obj_set_style_bg_color(w.dot, COL_AMBER, 0);
+    setBgColor(w.dot, COL_AMBER, 0);
   } else {
     setText(w.connTxt, "LIVE");
     setTextColor(w.connTxt, COL_GREEN);
-    lv_obj_set_style_bg_color(w.dot, COL_GREEN, 0);
+    setBgColor(w.dot, COL_GREEN, 0);
   }
 
   if (stale) {
@@ -987,6 +1098,22 @@ void begin() {
   g_lastFlashMs = millis();
 }
 
+void applyDebugMask() {
+  const bool ticksVisible = dbg(4);
+  for (int i = 0; i < 9; i++) {
+    if (!w.tickLine[i]) continue;
+    if (ticksVisible) {
+      lv_obj_remove_flag(w.tickLine[i], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(w.tickLine[i], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (g_dbgHideAll && w.tach) lv_obj_add_flag(w.tach, LV_OBJ_FLAG_HIDDEN);
+  if (!g_dbgHideAll && w.tach) lv_obj_remove_flag(w.tach, LV_OBJ_FLAG_HIDDEN);
+}
+
 void tick() {
   const uint32_t now = millis();
   const float dt = (float)(now - g_lastTickMs) / 1000.0f;
@@ -1032,9 +1159,42 @@ void tick() {
       g_peaks.boost = isnan(g_peaks.boost) ? l.boost : fmaxf(g_peaks.boost, l.boost);
   }
 
+  uint32_t t0 = micros();
   updateTach(c, g_shown.rpm, stale);
-  updateReadouts(c, l, d, stale);
-  updateConn(stale);
+  uint32_t t1 = micros();
+  // The tiles carry values that only arrive at 10 Hz and are already eased,
+  // so repainting them 30 times a second buys nothing. The tach above stays
+  // at the full rate because the needle is what the eye tracks.
+  static uint32_t lastReadouts = 0;
+  if (dbg(16) && (uint32_t)(now - lastReadouts) >= 100) {
+    lastReadouts = now;
+    updateReadouts(c, l, d, stale);
+  }
+  uint32_t t2 = micros();
+  if (dbg(32)) updateConn(stale);
+  uint32_t t3 = micros();
+
+  g_tachUs += t1 - t0;
+  g_readoutsUs += t2 - t1;
+  g_connUs += t3 - t2;
+  g_calls++;
+}
+
+void setDebugMask(uint16_t mask) {
+  const bool wasHidden = g_dbgHideAll;
+  g_dbgMask = mask;
+  g_dbgHideAll = (mask == 0);
+  (void)wasHidden;
+  applyDebugMask();
+  lv_obj_invalidate(lv_screen_active());
+}
+
+uint16_t debugMask() { return g_dbgMask; }
+
+Timings takeTimings() {
+  Timings t{g_tachUs, g_readoutsUs, g_connUs, g_calls};
+  g_tachUs = g_readoutsUs = g_connUs = g_calls = 0;
+  return t;
 }
 
 void showSettings(bool visible) {

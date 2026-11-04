@@ -76,6 +76,49 @@
 // "AUX" line (relay / dimmer / fan). Driven low at boot.
 #define BOARD_PIN_AUX 38
 
+// ---------------------------------------------------------- frame buffers
+// Two PSRAM frame buffers, with LVGL in DIRECT mode: LVGL still redraws
+// only the invalidated rectangles, but it draws them into the buffer the
+// panel is NOT scanning, and the swap happens at VSYNC. One buffer is
+// enough only if you accept LVGL painting into rows the panel is reading
+// out at that moment, which shows up as the image tearing/rolling.
+//
+// Note the render mode that goes with this: DIRECT (per-rectangle, into a
+// full-screen buffer), never FULL. FULL forces a whole 800x480 render plus
+// the same 768 KB of PSRAM traffic every frame, which both costs ~7 fps and
+// starves the panel's DMA.
+#ifndef LCD_USE_DOUBLE_FB
+#define LCD_USE_DOUBLE_FB 1
+#endif
+#define LCD_FB_COUNT (LCD_USE_DOUBLE_FB ? 2 : 1)
+
+// ------------------------------------------------------- RGB DMA buffering
+// The RGB peripheral scans the frame buffer out of PSRAM continuously at
+// ~41 MB/s (800x480x16bpp at 49 Hz) while the CPU is also reading and
+// writing PSRAM for LVGL and WiFi. If the DMA's prefetch falls behind, the
+// peripheral loses sync with the DMA and the whole image shifts (Espressif
+// calls it "insufficient bandwidth... permanent shift"); with
+// CONFIG_LCD_RGB_RESTART_IN_VSYNC it re-syncs every VSYNC, so the picture
+// jitters/rolls instead of staying displaced.
+//
+// The driver hides that behind an internal-SRAM "bounce" buffer that it
+// refills from PSRAM in bursts. Deeper = more slack against a WiFi burst.
+// The driver allocates TWO of these, so the cost is 2 x lines x 800 x 2 B:
+//   10 lines -> 32 KB, 16 lines -> 51 KB, 24 lines -> 77 KB.
+// Free heap at boot is ~115 KB, so stay well under half of it.
+#ifndef LCD_BOUNCE_LINES
+#define LCD_BOUNCE_LINES 16
+#endif
+
+// -------------------------------------------------------- pixel clock source
+// lcd_clk = src / (div_num + div_b/div_a), and on this peripheral a
+// fractional divider is allowed. 24 MHz divides PLL_F160M exactly only as
+// 6 + 2/3; PLL_D2 (240 MHz) gives a clean integer 10. An exact divider
+// removes any pixel-clock jitter from the picture.
+#ifndef LCD_USE_PLL240M
+#define LCD_USE_PLL240M 1
+#endif
+
 // -------------------------------------------------------------- touch
 #define TOUCH_I2C_SDA BOARD_I2C_SDA
 #define TOUCH_I2C_SCL BOARD_I2C_SCL
