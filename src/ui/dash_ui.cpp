@@ -3,22 +3,23 @@
 //
 // Widget map (see theme.h for the numbers):
 //
-//   +--------------------------------------------------------------+
-//   |  BOOST  [###############...................]        1.55     |
-//   |  REVS   [########################.......]           6800     |  top 252 px
-//   |         1   2   3   4   5   6   7   x1000             bar    |
-//   +------------------+-----------------+-------------------------+
-//   |  SPEED           | TEMPERATURES    |  HALDEX                 |  bottom 197 px
-//   |  123 km/h        |  cool / oil     |  mode, lock req/act, thr |
-//   +------------------+-----------------+-------------------------+
-//   | * LIVE  BRAKE HAND TC ASR AWD   peaks   RESET  DAY  SETTINGS | status 30 px
-//   +--------------------------------------------------------------+
+//   +----------------------------------------------------------------+
+//   | [###############################################.............]  |  REVS bar
+//   |  1    2    3    4    5    6    7                     x1000      |  full width
+//   |                        6800                                     |  big number
+//   +---------+----------+--------------+---------------------------+
+//   | SPEED   | BOOST    | TEMPERATURES | HALDEX                    |  4 tiles
+//   | 123 km/h| 1.55 bar | cool / oil   | mode, lock req/act, thr   |
+//   +---------+----------+--------------+---------------------------+
+//   | * LIVE  BRAKE HAND TC ASR AWD rpm peak  RESET PEAKS DAY SETTINGS|  status bar
+//   +----------------------------------------------------------------+
 //
 // The top band used to be a tach ring (3 anti-aliased arcs, 9 ticks, a
 // needle and a hub). On this board that cost ~58 ms of a 61 ms frame - it
-// was the entire frame budget - so it was replaced by two bars: a bar's
-// moving edge is an opaque rectangle, and only the cells that crossed the
-// edge are repainted. See docs/redesign-bars.md.
+// was the entire frame budget - so it was replaced by a bar: a bar's moving
+// edge is an opaque rectangle, and only the cells that crossed it are
+// repainted. REVS is the only full-width item and boost is a tile again, so
+// the same value never appears twice. See docs/redesign-bars.md.
 //
 // Values come from net/datafeed.h, which merges the C6's ESP-NOW broadcast
 // with its HTTP API, and nothing is drawn for a value that has never
@@ -51,19 +52,18 @@ const char *const kModeNames[6] = {"STOCK", "FWD", "50:50", "60:40", "75:25", "E
 struct Widgets {
   lv_obj_t *top = nullptr;  // the whole top band; long-press opens settings
 
-  // The two bars, their cells, and the row of numbers under the rev bar.
-  // A group per bar so the debug mask can hide them one at a time.
-  lv_obj_t *boostGrp = nullptr, *revGrp = nullptr, *ticksGrp = nullptr, *bigGrp = nullptr;
-  lv_obj_t *boostCell[L::BAR_SEG] = {};
+  // The rev bar, its cells, the row of numbers under it and the big number's
+  // row. A group each, so the debug mask can hide them one at a time.
+  lv_obj_t *revGrp = nullptr, *ticksGrp = nullptr, *numGrp = nullptr;
   lv_obj_t *revCell[L::BAR_SEG] = {};
-  lv_obj_t *tickLabel[12] = {};  // one per thousand rpm, minus both ends
+  lv_obj_t *tickLabel[12] = {};  // one per thousand rpm, minus the top slot
   lv_obj_t *tickUnit = nullptr;  // "x1000", at the right-hand end
   int tickLabels = 0;
 
-  lv_obj_t *rpmVal = nullptr, *boostVal = nullptr, *boostUnit = nullptr;
-  lv_obj_t *rpmCap = nullptr, *boostCap = nullptr;
+  lv_obj_t *rpmVal = nullptr;  // the big number, centred on its own row
 
   lv_obj_t *speedVal = nullptr, *speedPeak = nullptr;
+  lv_obj_t *boostVal = nullptr, *boostUnit = nullptr, *boostBar = nullptr, *boostPeak = nullptr;
   lv_obj_t *coolVal = nullptr, *coolBar = nullptr, *oilVal = nullptr, *oilBar = nullptr;
   lv_obj_t *modeVal = nullptr, *haldexSub = nullptr;
   lv_obj_t *lockReqVal = nullptr, *lockActVal = nullptr, *thrBar = nullptr;
@@ -99,18 +99,17 @@ uint32_t g_staleEvents = 0;
 uint32_t g_maxStaleAgeMs = 0;
 bool dbg(uint16_t bit) { return (g_dbgMask & bit) != 0; }
 
-uint32_t g_barsUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
+uint32_t g_gaugeUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
 bool g_dbgHideAll = false;
 uint32_t g_lastFlashMs = 0;
 uint32_t g_lastTickMs = 0;
 bool g_settingsOpen = false;
 bool g_stale = true;
 
-// Which cells of each bar are currently lit: 1 lit, 0 dark, -1 unknown.
+// Which cells of the rev bar are currently lit: 1 lit, 0 dark, -1 unknown.
 // -1 is the state after start-up and after the zone colours change, so the
 // first update after that repaints every cell instead of assuming dark.
 int8_t g_revLit[L::BAR_SEG];
-int8_t g_boostLit[L::BAR_SEG];
 
 // Lit/unlit colour per rev cell, from the rpm zones. Fixed until the
 // redline moves, so a cell's colour is decided once per settings change, not
@@ -352,24 +351,21 @@ void syncGauge() {
   }
 }
 
-// The two bars: 40 opaque cells each, painted once at build and then only
-// ever recoloured where the fill edge has moved. Nothing is resized, moved
-// or re-laid-out, which is what keeps a frame cheap.
-void buildBars(lv_obj_t *parent) {
-  w.top = opaque(parent, 0, 0, L::W, L::TOP_H, COL_BG);
+// The rev bar: 40 opaque cells, painted once at build and then only ever
+// recoloured where the fill edge has moved. Nothing is resized, moved or
+// re-laid-out, which is what keeps a frame cheap.
+void buildGauge(lv_obj_t *parent) {
+  w.top = opaque(parent, 0, 0, L::W, L::TILE_Y, COL_BG);
 
-  // One group per bar so the debug mask can switch each one off.
-  w.boostGrp = plain(w.top, L::BAR_X, L::BOOST_BAR_Y, L::BAR_W, L::BOOST_BAR_H);
+  // One group per element so the debug mask can switch each one off.
   w.revGrp = plain(w.top, L::BAR_X, L::REV_BAR_Y, L::BAR_W, L::REV_BAR_H);
   w.ticksGrp = plain(w.top, L::BAR_X, L::TICK_ROW_Y, L::BAR_W, L::TICK_ROW_H);
-  w.bigGrp = plain(w.top, L::VAL_X, 0, L::VAL_W, L::TOP_H);
+  w.numGrp = plain(w.top, 0, L::RPM_NUM_Y, L::W, L::RPM_NUM_H);
 
   for (int i = 0; i < L::BAR_SEG; i++) {
     const int x0 = (i * L::BAR_W) / L::BAR_SEG;
     const int x1 = ((i + 1) * L::BAR_W) / L::BAR_SEG - L::BAR_GAP;
-    w.boostCell[i] = opaque(w.boostGrp, x0, 0, x1 - x0, L::BOOST_BAR_H, COL_TRACK);
     w.revCell[i] = opaque(w.revGrp, x0, 0, x1 - x0, L::REV_BAR_H, COL_ZONE_GREEN);
-    g_boostLit[i] = -1;
   }
 
   // Numbers along the rev bar, plus the unit tag at its right-hand end.
@@ -382,33 +378,23 @@ void buildBars(lv_obj_t *parent) {
       fixedLabel(w.ticksGrp, L::BAR_W - 48, 0, 48, L::TICK_ROW_H, FONT_CAP, COL_DIM, "x1000");
   lv_obj_set_style_text_align(w.tickUnit, LV_TEXT_ALIGN_RIGHT, 0);
 
-  // Rule between the bars and the numbers they belong to.
-  opaque(w.top, L::VAL_DIV_X, 0, 1, L::TOP_H, COL_LINE);
-
-  // ---- right column: BOOST over REVS ------------------------------
-  w.boostCap = fixedLabel(w.bigGrp, 0, L::VAL_CAP_Y, L::VAL_W, 18, FONT_CAP, COL_DIM, "BOOST");
-  w.boostVal = fixedLabel(w.bigGrp, 0, L::VAL_BOOST_Y, L::VAL_W, 70, FONT_NUM, COL_FG, "--");
-  w.boostUnit = fixedLabel(w.bigGrp, 0, L::VAL_UNIT_Y, L::VAL_W, 20, FONT_SMALL, COL_DIM, "bar");
-  opaque(w.bigGrp, 0, L::VAL_DIV_Y, L::VAL_W, 1, COL_LINE);
-  w.rpmCap = fixedLabel(w.bigGrp, 0, L::VAL_RPM_Y - 16, L::VAL_W, 18, FONT_CAP, COL_DIM, "RPM");
-  w.rpmVal = fixedLabel(w.bigGrp, 0, L::VAL_RPM_Y, L::VAL_W, 90, FONT_RPM, COL_FG, "--");
-
-  // Right-aligned to the panel's right margin, like the mock-up.
-  lv_obj_t *right[3] = {w.boostVal, w.boostUnit, w.rpmVal};
-  for (int i = 0; i < 3; i++) {
-    lv_obj_set_style_text_align(right[i], LV_TEXT_ALIGN_RIGHT, 0);
-  }
+  // The big number, centred on a row of its own. The label box is exactly one
+  // line high, so "centred" is arithmetic instead of a layout pass, and it
+  // stays centred if the generated font changes size.
+  const int lh = FONT_RPM->line_height > 0 ? FONT_RPM->line_height : L::RPM_NUM_H;
+  w.rpmVal = fixedLabel(w.numGrp, 0, (L::RPM_NUM_H - lh) / 2, L::W, lh, FONT_RPM, COL_FG, "--");
+  lv_obj_set_style_text_align(w.rpmVal, LV_TEXT_ALIGN_CENTER, 0);
 
   syncGauge();
 }
 
 // --------------------------------------------------------------- tiles
-// Three tiles now. The BOOST tile is gone: boost is the bar at the top of
-// the screen plus the value beside it, and showing the same number in two
-// places was duplicating it.
+// The four original sections, at the widths dash.html gives them. BOOST is
+// back as a tile of its own: boost the bar is gone, so the value is shown
+// once, here, with its own small bar and its peak.
 void buildTiles(lv_obj_t *parent) {
-  const int y = L::BOTTOM_Y;
-  const int h = L::BOTTOM_H;
+  const int y = L::TILE_Y;
+  const int h = L::TILE_H;
 
   // ---- SPEED ------------------------------------------------------
   lv_obj_t *t0 = opaque(parent, L::COL0_X, y, L::COL0_W, h, COL_BG);
@@ -426,53 +412,67 @@ void buildTiles(lv_obj_t *parent) {
   w.speedPeak = fixedLabel(t0, L::TILE_PAD_H, h - 24, L::COL0_W - 2 * L::TILE_PAD_H, 18,
                            FONT_SMALL, COL_DIM, "peak --");
 
-  // ---- TEMPERATURES -----------------------------------------------
+  // ---- BOOST ------------------------------------------------------
   lv_obj_t *t1 = opaque(parent, L::COL1_X, y, L::COL1_W, h, COL_BG);
   lv_obj_set_style_border_side(t1, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t1, 1, 0);
   lv_obj_set_style_border_color(t1, COL_LINE, 0);
 
-  cap = label(t1, FONT_CAP, COL_DIM, "TEMPERATURES");
+  cap = label(t1, FONT_CAP, COL_DIM, "BOOST");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  const int tw = L::COL1_W - 2 * L::TILE_PAD_H;
-  lv_obj_t *cl = label(t1, FONT_CAP, COL_DIM, "COOLANT");
-  lv_obj_set_pos(cl, L::TILE_PAD_H, 40);
-  w.coolVal = fixedLabel(t1, L::TILE_PAD_H + tw - 92, 30, 92, 30, FONT_TEMP, COL_FG, "--");
-  lv_obj_set_style_text_align(w.coolVal, LV_TEXT_ALIGN_RIGHT, 0);
-  w.coolBar = bar(t1, L::TILE_PAD_H, 74, tw, 10, COL_GREEN, 0, 100);
+  const int bw = L::COL1_W - 2 * L::TILE_PAD_H;
+  w.boostVal = fixedLabel(t1, L::TILE_PAD_H, 40, bw, 52, FONT_NUM, COL_FG, "--");
+  w.boostUnit = fixedLabel(t1, L::TILE_PAD_H, 96, bw, 18, FONT_SMALL, COL_DIM, "bar");
+  w.boostBar = bar(t1, L::TILE_PAD_H, 128, bw, 10, COL_WHITE, 0, 100);
+  w.boostPeak = fixedLabel(t1, L::TILE_PAD_H, h - 24, bw, 18, FONT_SMALL, COL_DIM, "peak --");
 
-  lv_obj_t *ol = label(t1, FONT_CAP, COL_DIM, "OIL");
-  lv_obj_set_pos(ol, L::TILE_PAD_H, 104);
-  w.oilVal = fixedLabel(t1, L::TILE_PAD_H + tw - 92, 94, 92, 30, FONT_TEMP, COL_FG, "--");
+  // ---- TEMPERATURES -----------------------------------------------
+  lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
+  lv_obj_set_style_border_side(t2, LV_BORDER_SIDE_RIGHT, 0);
+  lv_obj_set_style_border_width(t2, 1, 0);
+  lv_obj_set_style_border_color(t2, COL_LINE, 0);
+
+  cap = label(t2, FONT_CAP, COL_DIM, "TEMPERATURES");
+  lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
+
+  const int tw = L::COL2_W - 2 * L::TILE_PAD_H;
+  lv_obj_t *cl = label(t2, FONT_CAP, COL_DIM, "COOLANT");
+  lv_obj_set_pos(cl, L::TILE_PAD_H, 44);
+  w.coolVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 34, 92, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_set_style_text_align(w.coolVal, LV_TEXT_ALIGN_RIGHT, 0);
+  w.coolBar = bar(t2, L::TILE_PAD_H, 78, tw, 10, COL_GREEN, 0, 100);
+
+  lv_obj_t *ol = label(t2, FONT_CAP, COL_DIM, "OIL");
+  lv_obj_set_pos(ol, L::TILE_PAD_H, 120);
+  w.oilVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 110, 92, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.oilVal, LV_TEXT_ALIGN_RIGHT, 0);
-  w.oilBar = bar(t1, L::TILE_PAD_H, 138, tw, 10, COL_GREEN, 0, 100);
+  w.oilBar = bar(t2, L::TILE_PAD_H, 154, tw, 10, COL_GREEN, 0, 100);
 
   // ---- HALDEX -----------------------------------------------------
-  lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
+  lv_obj_t *t3 = opaque(parent, L::COL3_X, y, L::COL3_W, h, COL_BG);
 
-  cap = label(t2, FONT_CAP, COL_DIM, "HALDEX");
+  cap = label(t3, FONT_CAP, COL_DIM, "HALDEX");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.modeVal = fixedLabel(t2, L::TILE_PAD_H, 36, L::COL2_W - 2 * L::TILE_PAD_H, 36, FONT_MODE,
-                         COL_FG, "--");
+  const int hw = L::COL3_W - 2 * L::TILE_PAD_H;
+  w.modeVal = fixedLabel(t3, L::TILE_PAD_H, 40, hw, 36, FONT_MODE, COL_FG, "--");
 
-  w.haldexSub = fixedLabel(t2, L::TILE_PAD_H, 70, L::COL2_W - 2 * L::TILE_PAD_H, 20, FONT_SMALL,
-                           COL_DIM, "coupling --");
+  w.haldexSub = fixedLabel(t3, L::TILE_PAD_H, 76, hw, 20, FONT_SMALL, COL_DIM, "coupling --");
 
-  lv_obj_t *lr = label(t2, FONT_CAP, COL_DIM, "LOCK REQ");
-  lv_obj_set_pos(lr, L::TILE_PAD_H, 94);
-  w.lockReqVal = fixedLabel(t2, L::COL2_W - 110, 86, 100, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_t *lr = label(t3, FONT_CAP, COL_DIM, "LOCK REQ");
+  lv_obj_set_pos(lr, L::TILE_PAD_H, 102);
+  w.lockReqVal = fixedLabel(t3, L::COL3_W - 110, 94, 100, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.lockReqVal, LV_TEXT_ALIGN_RIGHT, 0);
 
-  lv_obj_t *la = label(t2, FONT_CAP, COL_DIM, "LOCK ACT");
-  lv_obj_set_pos(la, L::TILE_PAD_H, 126);
-  w.lockActVal = fixedLabel(t2, L::COL2_W - 110, 118, 100, 30, FONT_TEMP, COL_FG, "--");
+  lv_obj_t *la = label(t3, FONT_CAP, COL_DIM, "LOCK ACT");
+  lv_obj_set_pos(la, L::TILE_PAD_H, 136);
+  w.lockActVal = fixedLabel(t3, L::COL3_W - 110, 128, 100, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.lockActVal, LV_TEXT_ALIGN_RIGHT, 0);
 
-  lv_obj_t *thr = label(t2, FONT_CAP, COL_FG, "THR");
-  lv_obj_set_pos(thr, L::TILE_PAD_H + 4, 160);
-  w.thrBar = bar(t2, L::TILE_PAD_H, 176, L::COL2_W - 2 * L::TILE_PAD_H, 12, COL_GREEN, 0, 100);
+  lv_obj_t *thr = label(t3, FONT_CAP, COL_FG, "THR");
+  lv_obj_set_pos(thr, L::TILE_PAD_H + 4, 170);
+  w.thrBar = bar(t3, L::TILE_PAD_H, 186, hw, 12, COL_GREEN, 0, 100);
 }
 
 // ---------------------------------------------------------- status bar
@@ -514,7 +514,7 @@ void buildStatusBar(lv_obj_t *parent) {
   w.lampAsr = lamp(s, 236, lampY, 40, "ASR");
   w.lampAwd = lamp(s, 280, lampY, 42, "AWD");
 
-  w.peakTxt = fixedLabel(s, 316, 8, 200, 18, FONT_CAP, COL_DIM, "");
+  w.peakTxt = fixedLabel(s, 332, 8, 180, 18, FONT_CAP, COL_DIM, "");
 
   w.btnReset = button(s, 516, 3, 104, 24, "RESET PEAKS", onResetPeaks);
   w.btnDay = button(s, 626, 3, 56, 24, "DAY", onToggleDay);
@@ -802,50 +802,33 @@ const char *boostUnitText() {
   }
 }
 
-// The bars, at the full render rate: the eye tracks the rev bar the way it
-// used to track the needle, and the boost bar fills as the throttle goes on.
+// The rev bar, at the full render rate: the eye tracks its edge the way it
+// used to track the needle.
 //
 // A cell is only touched when its state actually changes, so a frame that
-// moves the fill edge by one cell repaints exactly one 12x142 px rectangle
+// moves the fill edge by one cell repaints exactly one 18x104 px rectangle
 // instead of an arc. setBgColor() is the same-value guard used everywhere
 // else, so even the state comparison is belt and braces.
-void updateBars(const cfg::Data &c, float rpm, float boost) {
-  if (dbg(1)) {
-    const float frac = isnan(rpm) ? 0.0f : (rpm / c.rpmMax);
-    int lit = (int)lroundf(frac * L::BAR_SEG);
-    if (lit < 0) lit = 0;
-    if (lit > L::BAR_SEG) lit = L::BAR_SEG;
-    for (int i = 0; i < L::BAR_SEG; i++) {
-      const int8_t want = (i < lit) ? 1 : 0;
-      if (g_revLit[i] != want) {
-        g_revLit[i] = want;
-        setBgColor(w.revCell[i], want ? g_revCol[i].lit : g_revCol[i].unlit, 0);
-      }
-    }
-  }
+void updateRevBar(const cfg::Data &c, float rpm) {
+  if (!dbg(1)) return;
 
-  if (dbg(2)) {
-    // The bar itself is one colour; the number beside it carries the warning
-    // colour, so a single-colour bar does not lose the overboost cue.
-    const float frac = isnan(boost) ? 0.0f : (boost / c.boostMax);
-    int lit = (int)lroundf(frac * L::BAR_SEG);
-    if (lit < 0) lit = 0;
-    if (lit > L::BAR_SEG) lit = L::BAR_SEG;
-    for (int i = 0; i < L::BAR_SEG; i++) {
-      const int8_t want = (i < lit) ? 1 : 0;
-      if (g_boostLit[i] != want) {
-        g_boostLit[i] = want;
-        setBgColor(w.boostCell[i], want ? COL_WHITE : COL_TRACK, 0);
-      }
+  const float frac = isnan(rpm) ? 0.0f : (rpm / c.rpmMax);
+  int lit = (int)lroundf(frac * L::BAR_SEG);
+  if (lit < 0) lit = 0;
+  if (lit > L::BAR_SEG) lit = L::BAR_SEG;
+  for (int i = 0; i < L::BAR_SEG; i++) {
+    const int8_t want = (i < lit) ? 1 : 0;
+    if (g_revLit[i] != want) {
+      g_revLit[i] = want;
+      setBgColor(w.revCell[i], want ? g_revCol[i].lit : g_revCol[i].unlit, 0);
     }
   }
 }
 
-// The two big numbers and the boost unit. Both labels are only repainted
-// when their text or colour changes, so this costs nothing on the frames
-// where the value has not moved.
-void updateGaugeText(const cfg::Data &c, float rpm, float boost) {
-  if (!dbg(8)) return;
+// The big number. It is only repainted when its text or colour changes, so
+// this costs nothing on the frames where the value has not moved.
+void updateGaugeText(const cfg::Data &c, float rpm) {
+  if (!dbg(4)) return;
 
   // A missing rpm shows as "--"; a stale one keeps its last value, because
   // going stale is the status light's job.
@@ -857,36 +840,26 @@ void updateGaugeText(const cfg::Data &c, float rpm, float boost) {
     snprintf(buf, sizeof(buf), "--");
   }
   // Shift cue: the rev readout flashes red. The old corner SHIFT box is
-  // gone - the value column holds the numbers now - and a 96 px number
-  // flashing is a bigger cue than a 64 px box was.
+  // gone, and a 96 px number flashing is a bigger cue than a 64 px box was.
   const bool flash = have && (rpm >= c.rpmShift) && g_flashOn;
   setSuffix(w.rpmVal, buf, flash ? COL_RED : COL_FG);
-
-  fmtBoost(buf, sizeof(buf), boost);
-  setSuffix(w.boostVal, buf, colFor(boost, c.boostWarn, c.boostCrit));
-  setText(w.boostUnit, boostUnitText());
 }
 
 void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telemetry::Dash &d) {
   (void)live;  // only the interpolated copy is drawn
-  if (!dbg(16)) return;
+  if (!dbg(8)) return;
   // The last known values stay on the glass when the data goes stale (the
   // status light says so); "--" is reserved for values never received, which
   // is what NaN means.
   const Values v = g_shown;
   char buf[32];
 
-  // The two peaks that have no tile of their own. Speed's peak is in the
-  // SPEED tile, where it has always been.
+  // Speed's and boost's peaks live in their own tiles, where the value they
+  // belong to is. The rpm peak has no tile, so it lives in the status bar.
   {
-    char rp[16] = "--", bp[16] = "--";
+    char rp[16] = "--";
     if (!isnan(g_peaks.rpm)) snprintf(rp, sizeof(rp), "%d", (int)lroundf(g_peaks.rpm));
-    if (!isnan(g_peaks.boost)) {
-      char b[16];
-      fmtBoost(b, sizeof(b), g_peaks.boost);
-      snprintf(bp, sizeof(bp), "%s %s", b, boostUnitText());
-    }
-    snprintf(buf, sizeof(buf), "rpm %s   boost %s", rp, bp);
+    snprintf(buf, sizeof(buf), "rpm peak %s", rp);
     setText(w.peakTxt, buf);
   }
 
@@ -902,6 +875,28 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
   } else {
     snprintf(buf, sizeof(buf), "peak %d", (int)lroundf(g_peaks.speed));
     setText(w.speedPeak, buf);
+  }
+
+  // ---- boost
+  fmtBoost(buf, sizeof(buf), v.boost);
+  setSuffix(w.boostVal, buf, colFor(v.boost, c.boostWarn, c.boostCrit));
+  setText(w.boostUnit, boostUnitText());
+  {
+    int pct = 0;
+    if (!isnan(v.boost)) {
+      pct = (int)((v.boost / c.boostMax) * 100.0f);
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+    }
+    setBar(w.boostBar, pct);
+  }
+  if (isnan(g_peaks.boost)) {
+    setText(w.boostPeak, "peak --");
+  } else {
+    char b[16];
+    fmtBoost(b, sizeof(b), g_peaks.boost);
+    snprintf(buf, sizeof(buf), "peak %s", b);
+    setText(w.boostPeak, buf);
   }
 
   // ---- temperatures
@@ -978,7 +973,7 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
 }
 
 void updateConn(bool stale) {
-  if (!dbg(32)) return;
+  if (!dbg(16)) return;
   const telemetry::Stats s = telemetry::stats();
 
   // Staleness now lives entirely in the status light: the dashboard keeps
@@ -1018,13 +1013,13 @@ void begin() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  buildBars(scr);
+  buildGauge(scr);
   buildTiles(scr);
   buildStatusBar(scr);
 
   // Long-press the top band opens settings, as the tach ring used to: it is
-  // the whole top half of the screen, which beats the 24 px status-bar
-  // buttons as a target in a moving car. The rev bar is inside it.
+  // the whole band above the tiles, which beats the 24 px status-bar buttons
+  // as a target in a moving car. The rev bar is inside it.
   lv_obj_add_flag(w.top, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(w.top, onLongPress, LV_EVENT_LONG_PRESSED, nullptr);
 
@@ -1039,12 +1034,13 @@ void begin() {
 }
 
 void applyDebugMask() {
-  // The bars are groups, so a group is one hide/show rather than 40 of them.
+  // The gauge parts are groups, so a group is one hide/show rather than 40
+  // of them.
   struct Group {
     lv_obj_t *obj;
     uint16_t bit;
   };
-  const Group groups[4] = {{w.revGrp, 1}, {w.boostGrp, 2}, {w.ticksGrp, 4}, {w.bigGrp, 8}};
+  const Group groups[3] = {{w.revGrp, 1}, {w.ticksGrp, 2}, {w.numGrp, 4}};
   for (const Group &g : groups) {
     if (!g.obj) continue;
     if (dbg(g.bit)) {
@@ -1129,23 +1125,23 @@ void tick() {
   }
 
   uint32_t t0 = micros();
-  // The bars and the big numbers run at the full rate: the rev bar's edge is
+  // The rev bar and the big number run at the full rate: the bar's edge is
   // what the eye tracks now that the needle is gone.
-  updateBars(c, g_shown.rpm, g_shown.boost);
-  updateGaugeText(c, g_shown.rpm, g_shown.boost);
+  updateRevBar(c, g_shown.rpm);
+  updateGaugeText(c, g_shown.rpm);
   uint32_t t1 = micros();
   // The tiles carry values that only arrive at 10 Hz and are already eased,
   // so repainting them 30 times a second buys nothing.
   static uint32_t lastReadouts = 0;
-  if (dbg(16) && (uint32_t)(now - lastReadouts) >= 100) {
+  if (dbg(8) && (uint32_t)(now - lastReadouts) >= 100) {
     lastReadouts = now;
     updateReadouts(c, l, d);
   }
   uint32_t t2 = micros();
-  if (dbg(32)) updateConn(stale);
+  if (dbg(16)) updateConn(stale);
   uint32_t t3 = micros();
 
-  g_barsUs += t1 - t0;
+  g_gaugeUs += t1 - t0;
   g_readoutsUs += t2 - t1;
   g_connUs += t3 - t2;
   g_calls++;
@@ -1166,8 +1162,8 @@ void setDebugMask(uint16_t mask) {
 uint16_t debugMask() { return g_dbgMask; }
 
 Timings takeTimings() {
-  Timings t{g_barsUs, g_readoutsUs, g_connUs, g_calls};
-  g_barsUs = g_readoutsUs = g_connUs = g_calls = 0;
+  Timings t{g_gaugeUs, g_readoutsUs, g_connUs, g_calls};
+  g_gaugeUs = g_readoutsUs = g_connUs = g_calls = 0;
   return t;
 }
 

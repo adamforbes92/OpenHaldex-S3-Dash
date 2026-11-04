@@ -20,11 +20,10 @@ BAUD = 115200
 STEPS = [
     ("baseline (everything on)", ""),
     ("rev bar off", "1"),
-    ("boost bar off too", "2"),
-    ("tick numbers off too", "3"),
-    ("big numbers off too", "4"),
-    ("readouts off too", "5"),
-    ("status bar off too", "6"),
+    ("tick numbers off too", "2"),
+    ("big number off too", "3"),
+    ("readouts off too", "4"),
+    ("status bar off too", "5"),
     ("everything off", "9"),
     ("everything back on", "0"),
 ]
@@ -32,7 +31,7 @@ STEPS = [
 RE_RENDER = re.compile(
     r"render ([\d.]+) fps \| ([\d.]+) ms/loop, ([\d.]+) ms/busy of a ([\d.]+) ms period"
     r" \| ([\d.]+) ms/flush")
-RE_TICK = re.compile(r"ms/tick: bars ([\d.]+) readouts ([\d.]+) conn ([\d.]+)")
+RE_TICK = re.compile(r"ms/tick: gauge ([\d.]+) readouts ([\d.]+) conn ([\d.]+)")
 RE_VSYNC = re.compile(r"vsync ([\d.]+)/s")
 
 ser = serial.Serial(PORT, BAUD, timeout=0.2)
@@ -82,7 +81,7 @@ for label, keys in STEPS:
     use_vsync = vsync[-1] if vsync else float("nan")
     rows.append((label, use_fps, use_loop, t, m, use_busy, use_flush))
     print(f"{label:28s} fps={use_fps:5.1f} loop={use_loop:6.1f} busy={use_busy:6.1f} "
-          f"flush={use_flush:6.1f} bars={t[0]:>6} readouts={t[1]:>6} vsync={use_vsync:4.0f}/s "
+          f"flush={use_flush:6.1f} gauge={t[0]:>6} readouts={t[1]:>6} vsync={use_vsync:4.0f}/s "
           f"{m}", flush=True)
 
 ser.close()

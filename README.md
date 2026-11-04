@@ -47,9 +47,9 @@ nothing.
 ## 2. What it looks like
 
 The top band is **not** a port of `dash.html`: the tach ring, needle and ticks
-were replaced by two segmented bars and two large numbers, because on this
-board the ring was the entire frame budget (`docs/redesign-bars.md`). The band
-below it still follows the page's geometry formula:
+were replaced by one segmented bar and a large number, because on this board
+the ring was the entire frame budget (`docs/redesign-bars.md`). The four tiles
+below it still follow the page's geometry formula:
 
 ```
 u = min(width / 100, height / 56)          -> 8 px at 800x480
@@ -57,23 +57,23 @@ u = min(width / 100, height / 56)          -> 8 px at 800x480
 
 ```
 +------------------------------------------------------------------+
-| BOOST  [###############...............]                  1.55   |
-| REVS   [########################......]                 6800   |
-|        1   2   3   4   5   6   7   x1000                bar    |
-+------------------+-----------------+---------------------------+
-|  SPEED           |  TEMPERATURES   |  HALDEX                    |
-|   123            |  COOLANT    92  |  EXPERT                    |
-|   km/h           |  [========]     |  coupling closed           |
-|   peak 187       |  OIL       108  |  LOCK REQ  40%             |
-|                  |  [=======]      |  LOCK ACT  38%             |
-|                  |                 |  THR [===]                 |
-+------------------+-----------------+---------------------------+
-| * LIVE   BRAKE HAND TC ASR AWD        RESET PEAKS DAY SETTINGS    |
+| [###############################################.............]  |  REVS
+|  1    2    3    4    5    6    7                        x1000    |  full width
+|                         6800                                     |  big number
++---------+----------+--------------+-----------------------------+
+| SPEED   | BOOST    | TEMPERATURES | HALDEX                      |
+| 123 km/h| 1.55 bar | COOLANT   92 | EXPERT                      |
+| peak 187| [======] | [========]   | coupling closed             |
+|         | peak 1.8 | OIL      108 | LOCK REQ  40%               |
+|         |          | [=======]    | LOCK ACT  38%               |
+|         |          |              | THR [===]                   |
++---------+----------+--------------+-----------------------------+
+| * LIVE  BRAKE HAND TC ASR AWD  rpm peak  RESET PEAKS DAY SETTINGS |
 +------------------------------------------------------------------+
 ```
 
-Boost appears once — as the white bar at the top plus the number beside it. The
-old BOOST tile is gone; showing the same value twice was duplication.
+REVS is the only full-width item; everything else is a tile, so no value is
+shown twice. Boost is a tile again (value, unit, a small bar, its peak).
 
 Everything that cannot be measured shows `--`, never a fake zero: a JSON
 `null` from the C6 is carried all the way to the screen as "unknown".
@@ -389,7 +389,7 @@ source is printed at boot, and `p` on the serial console steps the clock down
 
 | Key | Effect |
 |---|---|
-| `1`..`6` | toggle redraw groups: rev bar, boost bar, tick numbers, big numbers, readouts, status bar |
+| `1`..`5` | toggle redraw groups: rev bar, tick numbers, big number, tile readouts, status bar |
 | `0` / `9` | all on / all off |
 | `p` | step the pixel clock down one notch |
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
@@ -412,10 +412,10 @@ have to be stopped: `E` (stop listening) and then `n` (stop polling). Either
 one alone leaves the dashboard live — which is the point of the fallback, and
 `[stats] source ...` says which one is carrying it.
 
-Geometry (bar cell size, tile widths and padding) is derived in
-`include/theme.h`, so it is adjusted in one place. Only the top band is a
-redesign — see `docs/redesign-bars.md`; mock-ups and the tool that draws them
-are in `docs/mockups/` and `tools/mockup_dash.py`.
+Geometry (bar cell size, the big number's row, tile widths and padding) is
+derived in `include/theme.h`, so it is adjusted in one place. Only the top
+band is a redesign — see `docs/redesign-bars.md`; mock-ups and the tool that
+draws them are in `docs/mockups/` and `tools/mockup_dash.py`.
 
 ---
 
@@ -539,18 +539,18 @@ docs/
 | Stale behaviour | **done** — the data stays on the glass and only the status light changes; proved by diffing frame dumps (§8) |
 | ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate |
 | ESP-NOW drives the dashboard (phase 2) | **done** — `rpm`/`speed`/`throttle`/`boost`/`lock*`/`oil` and the brake, handbrake, coupling, temp-protection and CAN flags come from the packet; coolant and the TC/ASR/AWD lamps stay on HTTP; the HTTP fallback and the both-gone stale path were both staged on the bench (§3) |
-| Bar redesign (ring -> two bars) | **done** — the tach ring was ~34 ms and the needle's dirty patch ~23.5 ms of a 58.8 ms frame; the mask sweep is now flat across every redraw group at the unchanged 16 MHz pixel clock (`docs/redesign-bars.md`) |
+| Bar redesign (ring -> one bar) | **done** — the tach ring was ~34 ms and the needle's dirty patch ~23.5 ms of a 58.8 ms frame; the mask sweep is now flat across every redraw group at the unchanged 16 MHz pixel clock (`docs/redesign-bars.md`) |
 | On-car test | not yet |
 
 Build result:
 
 ```
-RAM:   153 692 / 327 680 B   (46.9%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 619 106 / 1 966 080 B (82.4%) <- of the 1.875 MB OTA slot
+RAM:   153 492 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 618 742 / 1 966 080 B (82.3%) <- of the 1.875 MB OTA slot
 ```
 
 (The bar redesign made flash go *down*: the deleted arc, needle, hub and tick
-code outweighed the two generated 96 px / 56 px fonts.)
+code outweighed the generated 96 px / 56 px fonts.)
 
 ### Memory, exactly
 
