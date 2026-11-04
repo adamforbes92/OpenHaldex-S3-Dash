@@ -355,6 +355,9 @@ in one place.
 
 ## 9. Roadmap
 
+The first item has a full plan in [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
+
+
 1. **ESP-NOW `OHX_STATUS` as the primary transport.** The C6 already
    broadcasts a richer packet every 100 ms (`OHX_STATUS_MS`) including
    battery voltage, clutch temperature, module temperature and the Haldex
