@@ -79,8 +79,16 @@ Everything that cannot be measured shows `--`, never a fake zero: a JSON
 `null` from the C6 is carried all the way to the screen as "unknown".
 
 Features carried over from the page: peak tracking, shift-light flash,
-stale/disconnect overlay, day/night brightness, and a settings page with all
-the same thresholds.
+day/night brightness, and a settings page with all the same thresholds.
+
+**Staleness only moves the status light.** When the live data stops arriving
+the dashboard keeps the last values it had — the needle stops where it was,
+the tiles keep their numbers — and the status dot turns amber with `STALE`
+(or `WAIT` before the first sample ever arrives, `NO WIFI` in red when the
+link itself is down). Nothing is blanked and no overlay covers the screen; a
+value that was *never* received stays at `--`, because NaN is the only thing
+that draws a dash. `updateTach` / `updateReadouts` therefore take no `stale`
+flag at all, and the only consumer of it is `updateConn`.
 
 **Deliberate deviations from `dash.html`:**
 
@@ -237,7 +245,7 @@ Defaults are the same as `dash.html`:
 | oil warn / crit (C) | 120 / 135 |
 | boost max / warn / crit (mbar gauge) | 2500 / 1800 / 2200 |
 | temp units / boost units | C / bar |
-| poll live / dash / stale | 100 / 1000 / 500 ms |
+| poll live / dash / stale | 100 / 1000 / 1500 ms |
 
 Stored in NVS (`Preferences`, namespace `ohxdash`) as one versioned blob,
 so a firmware update that changes the struct layout falls back to defaults
@@ -342,10 +350,16 @@ source is printed at boot, and `p` on the serial console steps the clock down
 | `0` / `9` | all on / all off |
 | `p` | step the pixel clock down one notch |
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
+| `n` | pause / resume the HTTP polling (lets a stale transition be staged on the bench) |
+| `b` | toggle the bounce buffer between 0 and 16 lines |
 
 `d` is the bench substitute for a camera: `tools/serial_cmd.py d 34` shows
-what is on the glass, which is how the stale overlay and the layout were
-verified without a screen in front of you.
+what is on the glass, which is how the layout was verified without a screen
+in front of you — and how the stale change was proved: dumping the frame
+while live and while stale leaves all 36 rows identical except the two
+status-bar rows, and within those only the dot and the state word.
+`tools/serial_seq.py "35:d,42:n,48:d,56:n"` drives a whole timed scene in one
+run (here: dump live, pause polling, dump stale, resume).
 
 Geometry (ring radius, tick spacing, tile widths) is all derived in
 `include/theme.h` from the same formulas as `dash.html`, so it is adjusted

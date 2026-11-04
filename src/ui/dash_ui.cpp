@@ -60,7 +60,6 @@ struct Widgets {
   lv_obj_t *btnReset = nullptr, *btnDay = nullptr, *btnCfg = nullptr;
   lv_obj_t *dayLabel = nullptr;
 
-  lv_obj_t *stale = nullptr, *staleBig = nullptr, *staleSmall = nullptr;
   lv_obj_t *settings = nullptr, *kb = nullptr;
 } w;
 
@@ -547,20 +546,6 @@ void buildStatusBar(lv_obj_t *parent) {
   w.dayLabel = lv_obj_get_child(w.btnDay, 0);
 }
 
-// ------------------------------------------------------------- overlay
-void buildStaleOverlay(lv_obj_t *parent) {
-  // Fully opaque: an alpha layer here would force a software blend of the
-  // whole 800x449 area on every frame while disconnected.
-  w.stale = opaque(parent, 0, 0, L::W, L::TOP_H + L::BOTTOM_H, lv_color_hex(0x0a0a0a));
-  lv_obj_add_flag(w.stale, LV_OBJ_FLAG_HIDDEN);
-
-  w.staleBig = label(w.stale, FONT_BIG, COL_DIM, "NO DATA");
-  lv_obj_align(w.staleBig, LV_ALIGN_CENTER, 0, -18);
-
-  w.staleSmall = label(w.stale, FONT_BODY, COL_DIM, "waiting for /api/live ...");
-  lv_obj_align(w.staleSmall, LV_ALIGN_CENTER, 0, 30);
-}
-
 // ------------------------------------------------------------ settings
 cfg::Data g_edit;
 
@@ -851,9 +836,12 @@ const char *boostUnitText() {
   }
 }
 
-void updateTach(const cfg::Data &c, float rpm, bool stale) {
+void updateTach(const cfg::Data &c, float rpm) {
   if (!dbg(1) && !dbg(2) && !dbg(8)) return;
-  const bool have = !stale && !isnan(rpm);
+  // A missing or never-received rpm shows as "--", but old rpm keeps its
+  // needle: going stale is signalled by the status light, not by wiping the
+  // screen. So the only thing that can blank the gauge is NaN.
+  const bool have = !isnan(rpm);
   const float frac = have ? (rpm / c.rpmMax) : 0.0f;
   const float fAmber = c.rpmAmber / c.rpmMax;
   const float fRed = c.rpmRedline / c.rpmMax;
@@ -914,11 +902,13 @@ void updateTach(const cfg::Data &c, float rpm, bool stale) {
   }
 }
 
-void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telemetry::Dash &d,
-                    bool stale) {
+void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telemetry::Dash &d) {
   (void)live;  // only the interpolated copy is drawn
   if (!dbg(16)) return;
-  const Values v = stale ? kBlank : g_shown;
+  // The last known values stay on the glass when the data goes stale (the
+  // status light says so); "--" is reserved for values never received, which
+  // is what NaN means.
+  const Values v = g_shown;
   char buf[32];
   char b2[32];
 
@@ -993,9 +983,7 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
     setText(w.modeVal, "--");
   }
 
-  if (stale) {
-    setText(w.haldexSub, "coupling --");
-  } else if (d.haldexCAN) {
+  if (d.haldexCAN) {
     const char *state = d.couplingOpen ? "coupling open" : "coupling closed";
     setText(w.haldexSub, d.tempProtection ? "temp protection" : state);
   } else {
@@ -1025,46 +1013,33 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
     setBar(w.thrBar, pct);
   }
 
-  // ---- lamps
-  lampState(w.lampBrake, !stale && d.brakeIn, false);
-  lampState(w.lampHand, !stale && d.handbrakeIn, false);
-  lampState(w.lampTc, !stale && d.tcOn, false);
-  lampState(w.lampAsr, !stale && d.asrOn, false);
-  lampState(w.lampAwd, !stale && d.awdWarning, true);
+  // ---- lamps. Last known state is held, like the readouts above: the amber
+  // status light is what tells the driver the data is no longer fresh.
+  lampState(w.lampBrake, d.brakeIn, false);
+  lampState(w.lampHand, d.handbrakeIn, false);
+  lampState(w.lampTc, d.tcOn, false);
+  lampState(w.lampAsr, d.asrOn, false);
+  lampState(w.lampAwd, d.awdWarning, true);
 }
 
 void updateConn(bool stale) {
   if (!dbg(32)) return;
   const telemetry::Stats s = telemetry::stats();
 
+  // Staleness now lives entirely in the status light: the dashboard keeps
+  // showing the last values it had, and this is the only thing that changes.
   if (!s.wifiUp) {
     setText(w.connTxt, "NO WIFI");
     setTextColor(w.connTxt, COL_RED);
     setBgColor(w.dot, COL_RED, 0);
   } else if (stale) {
-    setText(w.connTxt, "STALE");
+    setText(w.connTxt, s.liveOk ? "STALE" : "WAIT");
     setTextColor(w.connTxt, COL_AMBER);
     setBgColor(w.dot, COL_AMBER, 0);
   } else {
     setText(w.connTxt, "LIVE");
     setTextColor(w.connTxt, COL_GREEN);
     setBgColor(w.dot, COL_GREEN, 0);
-  }
-
-  if (stale) {
-    lv_obj_remove_flag(w.stale, LV_OBJ_FLAG_HIDDEN);
-    if (!s.wifiUp) {
-      setText(w.staleBig, "NO WIFI");
-      setText(w.staleSmall, "check settings: SSID / password");
-    } else if (!s.liveOk) {
-      setText(w.staleBig, "NO DATA");
-      setText(w.staleSmall, "waiting for /api/live ...");
-    } else {
-      setText(w.staleBig, "NO DATA");
-      setText(w.staleSmall, "connection to OpenHaldex lost");
-    }
-  } else {
-    lv_obj_add_flag(w.stale, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -1086,7 +1061,6 @@ void begin() {
   buildTach(scr);
   buildTiles(scr);
   buildStatusBar(scr);
-  buildStaleOverlay(scr);
 
   // Long-press anywhere on the tach opens settings: the status-bar buttons
   // are only 24 px tall, which is a small target in a moving car.
@@ -1184,7 +1158,7 @@ void tick() {
   }
 
   uint32_t t0 = micros();
-  updateTach(c, g_shown.rpm, stale);
+  updateTach(c, g_shown.rpm);
   uint32_t t1 = micros();
   // The tiles carry values that only arrive at 10 Hz and are already eased,
   // so repainting them 30 times a second buys nothing. The tach above stays
@@ -1192,7 +1166,7 @@ void tick() {
   static uint32_t lastReadouts = 0;
   if (dbg(16) && (uint32_t)(now - lastReadouts) >= 100) {
     lastReadouts = now;
-    updateReadouts(c, l, d, stale);
+    updateReadouts(c, l, d);
   }
   uint32_t t2 = micros();
   if (dbg(32)) updateConn(stale);

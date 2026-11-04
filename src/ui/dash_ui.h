@@ -30,8 +30,8 @@ bool settingsOpen();
 /// lamp, 16 = tile readouts, 32 = status bar. Clearing a bit stops that
 /// group from invalidating anything, which is how the render cost of each
 /// one is measured on real hardware. 0xFFFF (the default) draws everything.
-/// Number of times the stale overlay has appeared, and the oldest live data
-/// seen while it was up (ms). Bench instrument for "the screen went stale".
+/// Number of times the live data has gone stale, and the oldest live data
+/// seen while it was stale (ms). Bench instrument for the link dropping.
 uint32_t staleEvents();
 uint32_t maxStaleAgeMs();
 

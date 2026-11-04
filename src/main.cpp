@@ -87,7 +87,7 @@ void printStats() {
                 (s.ip >> 16) & 0xFF, (s.ip >> 24) & 0xFF, c.host, c.port, c.pollLiveMs,
                 c.pollDashMs);
   if (ui::staleEvents() > 0) {
-    Serial.printf("[stats] stale overlay shown %lu time(s), oldest data %lu ms\n",
+    Serial.printf("[stats] live data went stale %lu time(s), oldest data %lu ms\n",
                   (unsigned long)ui::staleEvents(), (unsigned long)ui::maxStaleAgeMs());
   }
   const ui::Timings t = ui::takeTimings();
