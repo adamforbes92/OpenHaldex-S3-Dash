@@ -1,0 +1,82 @@
+// =====================================================================
+// telemetry.h - the OpenHaldex-C6 client
+//
+// Two independent HTTP pollers run in a dedicated task on core 0:
+//
+//   GET /api/live        pollLiveMs (default 100 ms)   rpm, speed, throttle,
+//                                                      boost, coolantTemp,
+//                                                      oilTemp, lockTarget,
+//                                                      lockActual
+//   GET /api/dashboard   pollDashMs (default 1000 ms)  mode, Haldex state,
+//                                                      brake / lamp flags,
+//                                                      CAN health
+//
+// Why two rates: /api/dashboard on the C6 calls getCPUUsagePercent(), which
+// mallocs and walks every task on the single C6 core. Polling that at 10 Hz
+// would cost roughly ten times the CPU for no extra visual resolution.
+//
+// Why /api/dashboard is polled at all, and never slower than ~2 s: it is the
+// only handler that calls otaNoteWebActivity() on the C6, and the C6 shuts
+// its access point down after ~5 minutes without it.
+//
+// A field that the C6 reports as JSON null is stored as NAN, so "sensor not
+// present" and "sensor reads zero" stay distinguishable all the way to the UI.
+// =====================================================================
+#pragma once
+
+#include <stdint.h>
+
+namespace telemetry {
+
+struct Live {
+  float rpm, speed, throttle, boost;
+  float coolant, oil;
+  float lockTarget, lockActual;
+  bool everOk;
+  uint32_t ageMs;  // ms since the last successful parse
+};
+
+struct Dash {
+  int mode;          // -1 when unknown
+  int haldexState;   // -1 when unknown
+  int lockTarget;
+  int lockActual;
+  bool chassisCAN;
+  bool haldexCAN;
+  bool brakeIn;
+  bool handbrakeIn;
+  bool tcOn;
+  bool asrOn;
+  bool awdWarning;
+  bool couplingOpen;
+  bool tempProtection;
+  bool everOk;
+  uint32_t ageMs;
+};
+
+struct Stats {
+  uint32_t liveOk;
+  uint32_t liveFail;
+  uint32_t dashOk;
+  uint32_t dashFail;
+  uint32_t reconnects;
+  int16_t rssi;
+  bool wifiUp;
+  uint32_t ip;
+};
+
+/// Start the network task (core 0). Called once from setup().
+void begin();
+
+/// Consistent snapshots.
+Live live();
+Dash dash();
+Stats stats();
+
+/// True when the last live sample is recent enough to be trusted.
+bool liveFresh(uint32_t staleMs);
+
+/// Force a reconnect + interval reset (called after settings change).
+void restart();
+
+}  // namespace telemetry

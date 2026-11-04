@@ -1,0 +1,17 @@
+# --- PlatformIO / build
+.pio/
+.pioio/
+*.bin
+*.elf
+*.map
+.pioenvs/
+
+# --- local tooling
+.venv/
+__pycache__/
+*.pyc
+
+# --- NEVER commit WiFi credentials or a device dump
+include/wifi_secrets.h
+.backup/
+*.factory.bin

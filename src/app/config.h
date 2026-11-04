@@ -1,0 +1,72 @@
+// =====================================================================
+// config.h - persisted dashboard configuration (NVS)
+//
+// Mirrors DEFAULTS in dash.html so the two UIs behave identically:
+//   rpmMax 8000  rpmAmber 6000  rpmRedline 6800  rpmShift 7300
+//   coolWarn 100 coolCrit 110  oilWarn 120       oilCrit 135
+//   boostMax 2500 boostWarn 1800 boostCrit 2200 (millibar gauge)
+//   tempUnits "C"  boostUnits "bar"  brightness 1.0
+//   pollLiveMs 100  pollDashMs 1000  staleMs 500
+// =====================================================================
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace cfg {
+
+enum BoostUnits : uint8_t { BOOST_BAR = 0, BOOST_MBAR = 1, BOOST_PSI = 2 };
+
+struct Data {
+  // Connection to the OpenHaldex-C6. Stored in NVS, never in git.
+  char ssid[33];
+  char pass[65];
+  char host[48];
+  uint16_t port;
+
+  // Tachometer / warning thresholds.
+  float rpmMax;
+  float rpmAmber;
+  float rpmRedline;
+  float rpmShift;
+  float coolWarn;
+  float coolCrit;
+  float oilWarn;
+  float oilCrit;
+  float boostMax;
+  float boostWarn;
+  float boostCrit;
+
+  bool tempF;           // false = degC, true = degF
+  uint8_t boostUnits;   // BoostUnits
+  float brightness;     // 0..100 %
+
+  // Polling. pollDashMs must stay <= 2000 to keep the C6's WiFi awake:
+  // only /api/dashboard calls otaNoteWebActivity() on the C6, and it drops
+  // the access point after ~5 minutes of inactivity.
+  uint16_t pollLiveMs;
+  uint16_t pollDashMs;
+  uint16_t staleMs;
+};
+
+/// Load from NVS (or defaults + any build-time secrets on first boot).
+void begin();
+
+/// Validated, clamped, saved to NVS.
+void apply(const Data &d);
+
+/// Restore the shipped defaults (keeps NVS credentials).
+void setDefaults();
+
+/// Current values. The UI thread owns writes; scalars are read directly by
+/// the network task, strings are copied under a lock.
+const Data &get();
+
+/// Copy of the connection fields only, safe against a concurrent apply().
+void connectionCopy(char *ssid, size_t ssidLen, char *pass, size_t passLen, char *host,
+                    size_t hostLen, uint16_t &port);
+
+/// Bumped every time apply() runs, so the network task can reconnect.
+uint32_t revision();
+
+}  // namespace cfg

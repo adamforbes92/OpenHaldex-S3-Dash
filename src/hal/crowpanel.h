@@ -1,0 +1,41 @@
+// =====================================================================
+// crowpanel.h - board bring-up for the Elecrow CrowPanel 7.0" (ESP32-S3)
+//
+// Owns everything below the UI:
+//   * I2C bus + PCA9557 expander (LCD panel reset)
+//   * LovyanGFX RGB panel driver with two PSRAM frame buffers
+//   * LVGL display + pointer input registered straight onto those buffers
+//   * backlight and the spare GPIO38 output
+// =====================================================================
+#pragma once
+
+#include <stdint.h>
+
+namespace crowpanel {
+
+/// Power-on sequence: I2C, expander, panel reset, RGB bus, backlight,
+/// LVGL display + touch. Safe to call once from setup().
+/// Returns false if the panel could not be started (the caller should keep
+/// going anyway so the serial console stays usable).
+bool begin();
+
+/// Backlight brightness, 0..100 %. 0 fully off, 100 fully on.
+void setBacklight(uint8_t percent);
+
+/// The spare GPIO38 output on the CrowPanel (relay / dimmer / fan).
+void auxWrite(bool on);
+
+/// Free PSRAM in bytes, for the boot banner.
+uint32_t psramFree();
+
+/// Static description of what came up, for logging.
+struct Status {
+  bool expanderOk;
+  uint8_t expanderAddr;
+  bool panelOk;
+  bool touchOk;
+  int32_t minFbFree;  // bytes of PSRAM left after the frame buffers
+};
+const Status &status();
+
+}  // namespace crowpanel

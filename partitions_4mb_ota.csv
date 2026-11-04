@@ -1,0 +1,17 @@
+# OpenHaldex S3 Dash - 4 MB flash layout
+#
+# Two equal app slots so the dash can be updated over the air once it is
+# installed in the car (there is no USB cable behind the dashboard).
+#
+# The factory firmware on this board used a single 3.75 MB app slot plus a
+# 128 KB spiffs. This table keeps a 128 KB LittleFS (unused for now) and
+# splits the rest into two 1.875 MB OTA slots - enough for the ~1.53 MB
+# LVGL + WiFi image with room for growth.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x1e0000,
+app1,       app,  ota_1,   0x1f0000, 0x1e0000,
+littlefs,   data, spiffs,  0x3d0000, 0x20000,
+coredump,   data, coredump,0x3f0000, 0x10000,
