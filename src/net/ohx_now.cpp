@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "net/telemetry.h"
+#include "net/datafeed.h"
 #include "ohx_proto.h"
 
 namespace ohxnow {
@@ -38,6 +39,10 @@ int g_senderCount = 0;
 // it runs in the WiFi task and a blocking UART write there is a bad idea.
 volatile bool g_dumpRequest = false;
 bool g_firstSeen = false;           // guarded by g_mux, never cleared
+// Whether we *want* to be listening. Separate from g_enabled so that a
+// deliberate setEnabled(false) is not undone by poll()'s retry, which exists
+// only to wait for WiFi to come up.
+bool g_want = true;
 uint8_t g_dumpBuf[sizeof(OhxStatus)];
 int g_dumpLen = 0;
 int16_t g_dumpRssi = 0;
@@ -250,6 +255,7 @@ const char *fstr(float v) {
 
 bool begin() {
   if (g_enabled) return true;
+  g_want = true;
   if (WiFi.getMode() == WIFI_MODE_NULL) return false;  // WiFi must be started first
 
   const esp_err_t err = esp_now_init();
@@ -282,7 +288,7 @@ bool begin() {
 }
 
 void poll() {
-  if (!g_enabled) {
+  if (!g_enabled && g_want) {
     // WiFi comes up asynchronously in the network task, so retry politely
     // (once a second) rather than failing at boot.
     if ((uint32_t)(millis() - g_readyAtMs) < 1000) return;
@@ -337,6 +343,7 @@ void poll() {
 bool enabled() { return g_enabled; }
 
 bool setEnabled(const bool on) {
+  g_want = on;
   if (on == g_enabled) return true;
   if (on) return begin();
 
@@ -351,6 +358,7 @@ bool setEnabled(const bool on) {
   }
   esp_now_deinit();
   g_enabled = false;
+  g_readyAtMs = millis();  // a re-enable waits one retry interval, as at boot
   Serial.println("[now] listener off");
   return true;
 }
@@ -413,11 +421,11 @@ void printCompare() {
   const Stats st = stats();
 
   Serial.printf("\n[now] ESP-NOW vs HTTP   (packets %lu, rej %lu, dup %lu, gap %lu, %.1f Hz, "
-                "age %lu ms, %lu sender(s), rssi %d)\n",
+                "age %lu ms, %lu sender(s), rssi %d)   -- the glass is showing: %s\n",
                 (unsigned long)st.packets, (unsigned long)st.rejects, (unsigned long)st.duplicates,
                 (unsigned long)st.gaps, (double)st.hz,
                 st.ageMs == UINT32_MAX ? 0UL : (unsigned long)st.ageMs,
-                (unsigned long)st.senders, (int)st.rssi);
+                (unsigned long)st.senders, (int)st.rssi, feed::sourceName());
   if (!s.valid) Serial.println("  (no ESP-NOW packet received yet)");
   Serial.printf("  %-11s %10s   %10s\n", "field", "ESP-NOW", "HTTP");
   row("rpm", s.rpm, l.rpm, "");

@@ -218,3 +218,65 @@ per boot (`g_firstSeen`), and the `ms/busy` counters above, which immediately
 showed the loop was 100% busy and so the cost was not in the loop at all but
 in serial output the loop was calling.
 
+
+---
+
+## 8. Phase 2 as built (ESP-NOW feeds the glass)
+
+New file: `src/net/datafeed.{h,cpp}`, the one place that decides where a
+number came from. The UI asks it for `live()`, `dash()` and `fresh()`; it
+never touches `telemetry::` or `ohxnow::` itself any more.
+
+### The rules, in full
+
+| Rule | Why |
+|---|---|
+| Source = ESP-NOW while a packet has arrived within `kHoldMs` (500 ms), else HTTP | 500 ms is five missed packets: long enough not to flip on one dropped frame, short enough to switch before the screen looks wrong |
+| When ESP-NOW is the source, take every field the packet carries; for a numeric field marked "no data", use the HTTP value if HTTP has one | A field this Haldex generation never fills in (e.g. `oilTemp` is a Gen4 field) must not blank a tile that HTTP was filling |
+| Coolant always from HTTP | Not in the packet at all |
+| `tcOn` / `asrOn` / `awdWarning` always from HTTP | The packet has `OHX_F1_TC_FORCE` and `OHX_F3_ASR_OFF`, which are *off* flags, not the same thing as the API's lamp states. Mapping them by guessing would have been the one silent way to make the dashboard lie |
+| Stale = neither transport has delivered within `staleMs` | The screen is only stale when nothing is current |
+
+Consequences worth noting:
+
+* `brake`, `handbrake`, `couplingOpen` and `tempProtection` now update at
+  10 Hz instead of 1 Hz — the brake lamp is 900 ms quicker than it was.
+* The status light's `NO WIFI` now means *neither* transport is alive, so the
+  dashboard can read `LIVE` while the station is not even associated.
+* `/api/live` drops from 10 Hz to 1 Hz (it is now only coolant plus the
+  fallback), which also takes ~90 % of the HTTP CPU load off the C6. A config
+  version bump (3 → 4) migrates an existing settings blob rather than
+  discarding it, so the learnt `netUseStatic` survives.
+
+### Verified on the bench (all three paths)
+
+```
+[feed] values now come from esp-now (change 1)      <- before the WiFi join finishes
+[ui] LIVE (data age 21 ms, source esp-now)          <- while [stats] says "http down"
+
+E  -> [now] listener off
+[feed] values now come from http (change 2)         <- 500 ms later, still LIVE
+[stats] source http (packet age 590 ms, http up)
+
+n  -> [net] polling PAUSED
+[ui] STALE (data age 1529 ms, source http)          <- neither transport: amber light, values held
+n  -> [ui] LIVE (data age 39 ms, source http)
+E  -> [feed] values now come from esp-now (change 3)
+```
+
+### One thing that did not happen
+
+Moving the 10 Hz firehose off HTTP did **not** raise the render rate: 16.4 fps
+before, 16.4 fps after, at the same 16 MHz pixel clock. That is worth
+understanding before the next tuning step. The loop is ~60.6 ms busy out of a
+61.0 ms period, of which only ~14 ms is the panel flush — the rest is LVGL
+drawing in software into PSRAM. And 16.4 fps is exactly half of the panel's
+33 Hz, i.e. the work no longer fits inside one panel frame, so each frame
+costs two. Reducing the request *rate* (10 Hz -> 1 Hz) changed nothing, which
+says the cost sits in the WiFi stack being associated at all, not in our
+requests: with the link down the same build measured 42-49 fps.
+
+So the next performance lever is the render cost or the frame period, not the
+HTTP traffic — and the `p` / `b` console commands are still the fastest way to
+measure it. That is deliberately left alone for now: the instruction was to
+keep the pixel clock where it is known to be stable.

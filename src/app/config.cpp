@@ -19,7 +19,9 @@ namespace {
 constexpr const char *kNamespace = "ohxdash";
 constexpr const char *kKey = "cfg";
 constexpr uint32_t kMagic = 0x4F485844;  // 'OHXD'
-constexpr uint16_t kVersion = 3;  // 3: + netUseStatic; 2: staleMs 500 -> 1500
+constexpr uint16_t kVersion = 4;  // 4: pollLiveMs 100 -> 1000 (ESP-NOW is the
+                                  //    fast path now); 3: + netUseStatic;
+                                  //    2: staleMs 500 -> 1500
 
 struct Blob {
   uint32_t magic;
@@ -70,7 +72,11 @@ void setDefaults() {
   d.boostUnits = BOOST_BAR;
   d.brightness = 100.0f;
 
-  d.pollLiveMs = 100;
+  // /api/live is no longer the fast path: rpm, speed, throttle, boost, oil
+  // and the lock values arrive over ESP-NOW at 10 Hz. It stays at 1 Hz for
+  // coolant temperature, and it is the fallback for everything if the
+  // packets stop.
+  d.pollLiveMs = 1000;
   d.pollDashMs = 1000;
   // 1.5 s, not the 500 ms the web page uses: over WiFi a single request can
   // legitimately take a few hundred milliseconds, and at 500 ms that showed
@@ -88,9 +94,18 @@ void begin() {
   if (prefs.begin(kNamespace, true)) {
     Blob blob{};
     const size_t n = prefs.getBytesLength(kKey);
+    // A version 3 blob has exactly the same field layout, so it can be read
+    // and migrated rather than thrown away - throwing it away would also
+    // throw away netUseStatic, which was learnt on the bench, and cost 15 s
+    // of DHCP wait on the next boot.
     if (n == sizeof(blob) && prefs.getBytes(kKey, &blob, sizeof(blob)) == sizeof(blob) &&
-        blob.magic == kMagic && blob.version == kVersion) {
-      apply(blob.data);  // re-validates, and persists the clamped result
+        blob.magic == kMagic && (blob.version == kVersion || blob.version == 3)) {
+      Data d = blob.data;
+      if (blob.version < 4) {
+        d.pollLiveMs = 1000;  // the fast values no longer come from HTTP
+        Serial.println("[cfg] migrating settings: /api/live 100 ms -> 1000 ms (ESP-NOW)");
+      }
+      apply(d);  // re-validates, and persists the clamped result
     }
     prefs.end();
   }

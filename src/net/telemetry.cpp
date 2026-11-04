@@ -264,8 +264,13 @@ void logPollFailure(const char *what, int code) {
 
 void pollLive() {
   static JsonDocument doc;
+  // A longer poll interval must not turn into a longer stall when the C6 is
+  // unreachable: the net task has to get back round the loop to notice a
+  // dropped link quickly, so the receive timeout is capped rather than simply
+  // scaled with the period.
   uint16_t tmo = (uint16_t)(cfg::get().pollLiveMs * 3);
   if (tmo < 300) tmo = 300;
+  if (tmo > 1200) tmo = 1200;
   const int code = fetchJson(g_httpLive, g_httpLiveReady, "/api/live", tmo, doc);
   const uint32_t now = millis();
 

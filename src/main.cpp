@@ -19,6 +19,7 @@
 #include "hal/crowpanel.h"
 #include "net/telemetry.h"
 #include "net/ohx_now.h"
+#include "net/datafeed.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
 
@@ -92,9 +93,20 @@ void printStats() {
     Serial.printf("[stats] live data went stale %lu time(s), oldest data %lu ms\n",
                   (unsigned long)ui::staleEvents(), (unsigned long)ui::maxStaleAgeMs());
   }
+  // Which transport the numbers on the glass are coming from. Worth one line:
+  // a silent switch to the HTTP fallback looks like nothing at all on screen.
+  {
+    const uint32_t nowAge = feed::nowAgeMs();
+    char ageTxt[16];
+    if (nowAge == UINT32_MAX) {
+      snprintf(ageTxt, sizeof(ageTxt), "never");
+    } else {
+      snprintf(ageTxt, sizeof(ageTxt), "%lu ms", (unsigned long)nowAge);
+    }
+    Serial.printf("[stats] source %s (packet age %s, http %s)\n", feed::sourceName(), ageTxt,
+                  s.wifiUp ? "up" : "down");
+  }
 #if OHX_USE_ESP_NOW
-  // Phase 1: side by side with the HTTP numbers, but nothing on the glass
-  // comes from here yet.
   {
     const ohxnow::Stats n = ohxnow::stats();
     if (n.enabled) {
@@ -198,12 +210,16 @@ void handleSerial() {
 #endif
         continue;
       case 'E':
+#if OHX_USE_ESP_NOW
         // A/B on one boot: does listening cost the render rate?
         {
           const bool on = !ohxnow::enabled();
           Serial.printf("[now] %s listener ...\n", on ? "enabling" : "disabling");
           ohxnow::setEnabled(on);
         }
+#else
+        Serial.println("[now] built without OHX_USE_ESP_NOW");
+#endif
         continue;
       default: continue;
     }
@@ -244,9 +260,9 @@ void loop() {
   const uint32_t loopStart = micros();
   handleSerial();
 
-#if OHX_USE_ESP_NOW
-  ohxnow::poll();  // no-op until WiFi is up; prints the first packet's decode
-#endif
+  // Pumps the ESP-NOW listener (a no-op if this build has it switched off)
+  // and logs any change of the source the glass is being fed from.
+  feed::poll();
 
   if ((uint32_t)(now - g_lastUiMs) >= kUiPeriodMs) {
     g_lastUiMs = now;

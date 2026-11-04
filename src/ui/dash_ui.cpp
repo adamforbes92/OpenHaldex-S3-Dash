@@ -24,6 +24,7 @@
 
 #include "hal/crowpanel.h"
 #include "net/telemetry.h"
+#include "net/datafeed.h"
 #include "app/config.h"
 #include "theme.h"
 
@@ -1028,12 +1029,17 @@ void updateConn(bool stale) {
 
   // Staleness now lives entirely in the status light: the dashboard keeps
   // showing the last values it had, and this is the only thing that changes.
-  if (!s.wifiUp) {
+  //
+  // Two sources feed it now, so "no WiFi" means *neither* of them is alive:
+  // ESP-NOW needs no association, so packets arriving prove the C6 is there
+  // even when our own station has dropped off its access point.
+  if (!s.wifiUp && !feed::onNow()) {
     setText(w.connTxt, "NO WIFI");
     setTextColor(w.connTxt, COL_RED);
     setBgColor(w.dot, COL_RED, 0);
   } else if (stale) {
-    setText(w.connTxt, s.liveOk ? "STALE" : "WAIT");
+    // "WAIT" until one of the two has delivered something at all.
+    setText(w.connTxt, feed::source() == feed::Source::None ? "WAIT" : "STALE");
     setTextColor(w.connTxt, COL_AMBER);
     setBgColor(w.dot, COL_AMBER, 0);
   } else {
@@ -1105,9 +1111,11 @@ void tick() {
   }
 
   const cfg::Data &c = cfg::get();
-  const telemetry::Live l = telemetry::live();
-  const telemetry::Dash d = telemetry::dash();
-  const bool stale = !telemetry::liveFresh(c.staleMs);
+  // The merge point: ESP-NOW while its packets are arriving, HTTP for
+  // coolant and for the lamps the packet does not carry. See net/datafeed.h.
+  const telemetry::Live l = feed::live();
+  const telemetry::Dash d = feed::dash();
+  const bool stale = !feed::fresh(c.staleMs);
   // The screen's own idea of "stale" is what the user sees, so make every
   // transition visible on the console together with how old the data was.
   static bool lastStale = false;
@@ -1115,7 +1123,7 @@ void tick() {
   static uint32_t maxAgeMs = 0;
   g_maxStaleAgeMs = maxAgeMs;
   if (stale) {
-    const uint32_t age = telemetry::live().ageMs;
+    const uint32_t age = l.ageMs;
     if (age != UINT32_MAX && age > maxAgeMs) maxAgeMs = age;
   }
   if (stale != lastStale) {
@@ -1124,8 +1132,9 @@ void tick() {
       staleEvents++;
       g_staleEvents = staleEvents;
     }
-    Serial.printf("[ui] %s (live data age %lu ms, event %lu)\n", stale ? "STALE" : "LIVE",
-                  (unsigned long)telemetry::live().ageMs, (unsigned long)staleEvents);
+    Serial.printf("[ui] %s (data age %lu ms, source %s, event %lu)\n",
+                  stale ? "STALE" : "LIVE", (unsigned long)l.ageMs, feed::sourceName(),
+                  (unsigned long)staleEvents);
   }
   g_stale = stale;
 

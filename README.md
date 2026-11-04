@@ -103,22 +103,54 @@ flag at all, and the only consumer of it is `updateConn`.
 
 ## 3. Data flow
 
+Two transports feed the dashboard. **ESP-NOW is the primary one** — the C6
+broadcasts an `OhxStatus` packet every 100 ms with no web stack involved, so
+there is no access point, no sockets and no TCP in that path at all. HTTP is
+the fallback, and it still carries the fields the packet does not have.
+
 ```
-        core 0                                core 1
-+------------------------+          +--------------------------+
-| WiFi STA -> OpenHaldex |          | loop():                  |
-|                        |          |   ui::tick()   ~30 Hz    |
-| GET /api/live   10 Hz  |  struct  |   lv_timer_handler()     |
-| GET /api/dashboard 1 Hz| -------> |--------------------------|
-+------------------------+  (mutex) | LVGL -> 2x 800x480 PSRAM |
-                                   | frame buffers -> RGB DMA |
-                                   +--------------------------+
+        core 0                                 core 1
++-----------------------------+        +---------------------------+
+| "ohxnet" task               |        | loop()                    |
+|   WiFi STA -> C6 HTTP API   | struct |   ui::tick()     ~30 Hz   |
+|   GET /api/live       1 Hz  | --+    |   feed::poll()            |
+|   GET /api/dashboard  1 Hz  |   |    |   lv_timer_handler()      |
+| ESP-NOW receive (radio, no  |   +--> |---------------------------|
+|   association, no sockets)  |        | net/datafeed.cpp: choose  |
++-----------------------------+        |   source, merge fields    |
+      ^  ~10 Hz, no HTTP              | LVGL -> 2x 800x480 PSRAM  |
+      |                               | frame buffers -> RGB DMA  |
+   C6 broadcasts OHX_STATUS           +---------------------------+
+   to FF:FF:FF:FF:FF:FF
 ```
+
+`net/datafeed.{h,cpp}` is the single place that decides provenance:
+
+| | Source |
+|---|---|
+| `rpm`, `speed`, `throttle`, `boost`, `lockTarget`, `lockActual`, `oil` | ESP-NOW while packets are arriving (hold 500 ms), else HTTP |
+| `mode`, `haldexState`, `chassisCAN`, `haldexCAN`, `brakeIn`, `handbrakeIn`, `couplingOpen`, `tempProtection` | ESP-NOW — the packet has real bits for all of these, so the brake lamp now updates at 10 Hz instead of 1 Hz |
+| `coolant` | always HTTP — the packet has no coolant field |
+| `tcOn`, `asrOn`, `awdWarning` | always HTTP — the packet has `TC_FORCE` / `ASR_OFF` (off flags), which are not the same thing |
+| packets stopped | everything falls back to HTTP, and says so on the console |
+
+A numeric field the packet marks as "no data" (`OHX_NONE*` → NaN) falls back
+to the HTTP value if HTTP has one, so a field this Haldex generation never
+fills in cannot make the dashboard worse than it was. The source in use is
+printed in the stats line and on every change (`[feed] values now come from
+esp-now`), and `e` on the console dumps both transports side by side.
 
 | Endpoint | Rate | Fields used |
 |---|---|---|
-| `/api/live` | 100 ms | `rpm`, `speed`, `throttle`, `boost`, `coolantTemp`, `oilTemp`, `lockTarget`, `lockActual` |
-| `/api/dashboard` | 1000 ms | `mode`, `haldexState`, `lockTarget`, `lockActual`, `chassisCAN`, `haldexCAN`, `brakeIn`, `handbrakeIn`/`handbrakeOut`, `tcOn`, `asrOn`, `awdWarning`, `couplingOpen`, `tempProtection` |
+| `/api/live` | 1000 ms | `coolantTemp` — and everything, if the packets stop |
+| `/api/dashboard` | 1000 ms | `tcOn`, `asrOn`, `awdWarning` — and everything, if the packets stop |
+
+### Why HTTP is still there at all
+
+Three reasons, all deliberate: coolant temperature is not in the packet; the
+three lamps above are not in it with matching semantics; and if the C6 stops
+broadcasting (older firmware, `espNowEnabled` off, out of range) the
+dashboard keeps working at 1 Hz instead of going dark.
 
 ### Why two rates
 
@@ -245,7 +277,7 @@ Defaults are the same as `dash.html`:
 | oil warn / crit (C) | 120 / 135 |
 | boost max / warn / crit (mbar gauge) | 2500 / 1800 / 2200 |
 | temp units / boost units | C / bar |
-| poll live / dash / stale | 100 / 1000 / 1500 ms |
+| poll live / dash / stale | 1000 / 1000 / 1500 ms |
 
 Stored in NVS (`Preferences`, namespace `ohxdash`) as one versioned blob,
 so a firmware update that changes the struct layout falls back to defaults
@@ -350,7 +382,7 @@ source is printed at boot, and `p` on the serial console steps the clock down
 | `0` / `9` | all on / all off |
 | `p` | step the pixel clock down one notch |
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
-| `n` | pause / resume the HTTP polling (lets a stale transition be staged on the bench) |
+| `n` | pause / resume the HTTP polling |
 | `b` | toggle the bounce buffer between 0 and 16 lines |
 | `e` | ESP-NOW vs HTTP, every field side by side |
 | `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
@@ -364,43 +396,52 @@ status-bar rows, and within those only the dot and the state word.
 `tools/serial_seq.py "35:d,42:n,48:d,56:n"` drives a whole timed scene in one
 run (here: dump live, pause polling, dump stale, resume).
 
+To stage a **stale** screen now that ESP-NOW carries the data, both transports
+have to be stopped: `E` (stop listening) and then `n` (stop polling). Either
+one alone leaves the dashboard live — which is the point of the fallback, and
+`[stats] source ...` says which one is carrying it.
+
 Geometry (ring radius, tick spacing, tile widths) is all derived in
 `include/theme.h` from the same formulas as `dash.html`, so it is adjusted
 in one place.
 
 ---
 
-## 9. ESP-NOW (phase 1: listening)
+## 9. ESP-NOW
 
-The C6 already broadcasts a packed `OhxStatus` struct to the broadcast address
-every 100 ms (`OHX_STATUS_MS`) with **no web stack involved** — no access
-point association, no sockets, no HTTP. This firmware now listens to it and
-prints it beside the HTTP values, but **nothing on the glass comes from it
-yet**: HTTP is still the only source of truth, so a mistake here cannot make
-the display wrong, only the console noisy.
+The C6 broadcasts a packed `OhxStatus` struct to the broadcast address every
+100 ms (`OHX_STATUS_MS`) with **no web stack involved** — no access point
+association, no sockets, no HTTP. This firmware listens to it, and since phase
+2 it is **the source of the numbers on the glass**; HTTP stays for coolant
+temperature, for the three lamps the packet has no matching flag for, and as
+the fallback if the packets stop (§3).
 
 | | |
 |---|---|
 | Wire format | `include/ohx_proto.h`, a **verbatim copy** of the C6's shared header (`b54d9a1d`, sha256 `9f1a6351...`). Refresh it from upstream; never edit it. |
 | Listener | `src/net/ohx_now.{h,cpp}` — init, receive callback, decode, counters |
-| Build switch | `-DOHX_USE_ESP_NOW=1`; `0` removes the calls from `main.cpp` |
-| Console | `e` = every field, ESP-NOW beside HTTP. `E` = enable/disable at runtime |
-| Stats line | `[stats] esp-now 418 pkt (9.7 Hz), age live, rej 0 dup 0 gap 3, ch 1, rssi -33 dBm` |
+| Source choice | `src/net/datafeed.{h,cpp}` — ESP-NOW while packets arrive, HTTP otherwise |
+| Build switch | `-DOHX_USE_ESP_NOW=1`; `0` compiles a build that only ever uses HTTP (the listener is not even initialised) |
+| Console | `e` = every field, ESP-NOW beside HTTP. `E` = enable/disable the listener at runtime |
+| Stats lines | `[stats] source esp-now (packet age 27 ms, http up)` and `[stats] esp-now 418 pkt (9.7 Hz), rej 0 dup 0 gap 3, ch 1, rssi -33 dBm` |
+| Every change | `[feed] values now come from esp-now` / `... from http` |
 
-Measured on the bench: 84-byte packets, magic/type/proto all matching, decoded
+Verified on the bench: 84-byte packets, magic/type/proto matching, decoded
 field by field against the raw hexdump, 9.7-10.6 Hz sustained, 0 rejects and
 ~0.5 % sequence gaps (broadcast has no retransmission, so that is expected).
-A/B on one boot with `E` shows the listener costs **nothing** in render rate:
-16.2-16.4 fps either way, and the loop is ~60.2 ms busy out of a 61.0 ms
-period.
+Listening costs **nothing** in render rate (16.2-16.4 fps with the `E` toggle
+either way, and the loop is ~60.2 ms busy out of a 61.0 ms period).
 
-The bench has no CAN, so every fast value arrives as "no data" (both
-transports agree on that), and `mode` / `lockTarget` are the fields that can
-be cross-checked today — pressing the mode button on the OpenHaldex unit moves
-both sources together. The remaining values get validated in the car, where
-`e` puts the two transports side by side.
+Because ESP-NOW needs no association, the dashboard goes **LIVE before the
+WiFi join completes**: `[ui] LIVE (data age 21 ms, source esp-now)` while
+`http down`.
 
-Full plan, risks and the phase 1 write-up:
+In the car, `e` is the cross-check that matters: it prints both transports
+field by field, so any field whose scaling differs — `boost` is the one to
+watch, since the packet documents it as "mbar above ambient" — is visible
+rather than guessed at.
+
+Full plan, risks and the phase write-ups:
 [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
 
 ---
@@ -410,14 +451,13 @@ Full plan, risks and the phase 1 write-up:
 The first item has a full plan in [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
 
 
-1. **ESP-NOW `OHX_STATUS` as the primary transport.** *Phase 1 done* — the
-   packet is received, decoded and cross-checked against HTTP (§9). Phase 2 is
-   the switchover: take `rpm` / `speed` / `boost` / `throttle` / `lock*` (and
-   the free extras: clutch, module and oil temperatures, battery voltage,
-   per-wheel slip, steering) from the packet, leave coolant on a slow HTTP
-   poll, point staleness at the packet age, then walk the pixel clock back up
-   (16 -> 20 -> 24 MHz) with the PSRAM the HTTP traffic was eating. Phase 3
-   would add mode commands from the touchscreen (signed, and off by default).
+1. **ESP-NOW `OHX_STATUS` as the primary transport.** *Phases 1 and 2 done* —
+   the dashboard is fed from the packet (§3, §9). Left: validate the value
+   scaling in the car (`e`), then re-tune the pixel clock with the PSRAM the
+   HTTP traffic was eating (16 -> 20 -> 24 MHz), and only then decide whether
+   battery voltage, per-wheel slip or steering angle earn space on the layout.
+   Phase 3 would add mode commands from the touchscreen (signed, off by
+   default).
 2. Battery voltage readout once ESP-NOW is in.
 3. Config backup/restore over a small local web page served by the S3.
 
@@ -444,7 +484,8 @@ src/
     pca9557.h/.cpp          expander driver + I2C probe
   net/
     telemetry.h/.cpp        WiFi + /api/live + /api/dashboard, core 0 task
-    ohx_now.h/.cpp          ESP-NOW listener: decode + counters (phase 1)
+    ohx_now.h/.cpp          ESP-NOW listener: decode + counters
+    datafeed.h/.cpp         source selection: ESP-NOW packets vs HTTP
   sys/
     config.h/.cpp           NVS-backed settings, validation, revision counter
   ui/
@@ -468,15 +509,15 @@ src/
 | Tearing / jitter fixed | **done** — visually confirmed stable. Two frame buffers + DIRECT mode, push only on `lv_display_flush_is_last()`, flush_ready only after the panel's frame callback, PLL_D2 clock, 24-line bounce buffer, pclk 16 MHz |
 | Live data on screen | **done** — `/api/live` at 10 Hz; mode changes made on the OpenHaldex unit show up on the dash |
 | Stale behaviour | **done** — the data stays on the glass and only the status light changes; proved by diffing frame dumps (§8) |
-| ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate; HTTP is still the source of truth (§9) |
-| ESP-NOW drives the dashboard (phase 2) | not yet |
+| ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate |
+| ESP-NOW drives the dashboard (phase 2) | **done** — `rpm`/`speed`/`throttle`/`boost`/`lock*`/`oil` and the brake, handbrake, coupling, temp-protection and CAN flags come from the packet; coolant and the TC/ASR/AWD lamps stay on HTTP; the HTTP fallback and the both-gone stale path were both staged on the bench (§3) |
 | On-car test | not yet |
 
 Build result:
 
 ```
-RAM:   153 212 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 632 274 / 1 966 080 B (83.0%) <- of the 1.875 MB OTA slot
+RAM:   153 220 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 633 426 / 1 966 080 B (83.1%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly
