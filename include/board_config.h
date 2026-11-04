@@ -45,7 +45,13 @@
 #define LCD_PIN_HSYNC 39
 #define LCD_PIN_PCLK 0
 
-#define LCD_PCLK_HZ 24000000  // 800x480 @ ~33 Hz frame rate
+// 16 MHz instead of Elecrow's 24: the panel's DMA reads its frame buffer out
+// of PSRAM continuously (800x480x16bpp = 37.9 MB/s at 24 MHz), and this board
+// measures only ~35-44 MB/s of total PSRAM bandwidth, so the display was
+// eating the whole memory bus and every byte WiFi moved showed up as jitter.
+// 16 MHz asks for 25.3 MB/s and still gives 33 refreshes per second, which is
+// above film rate. 'p' on the serial console walks 24/20/16/12 MHz at runtime.
+#define LCD_PCLK_HZ 16000000  // 800x480 @ ~33 Hz frame rate
 #define LCD_HSYNC_POLARITY 0
 #define LCD_HSYNC_FRONT_PORCH 40
 #define LCD_HSYNC_PULSE_WIDTH 48
@@ -106,8 +112,19 @@
 // The driver allocates TWO of these, so the cost is 2 x lines x 800 x 2 B:
 //   10 lines -> 32 KB, 16 lines -> 51 KB, 24 lines -> 77 KB.
 // Free heap at boot is ~115 KB, so stay well under half of it.
+//
+// 0 disables the bounce buffer entirely: the RGB DMA then streams the frame
+// buffer straight out of PSRAM, which is how LovyanGFX/Elecrow's own example
+// drives this panel. That is the "known good" path, but it also removes all
+// slack against PSRAM contention, so a starved DMA shifts the image. The
+// other cost of enabling it is that draw_bitmap() stops blocking (measured
+// 0.06 ms per flush), so LVGL has to be told separately when the frame is
+// really done - that is what the frame callback in crowpanel.cpp is for.
+// 'b' on the serial console switches between the two at runtime. Measured on
+// this board: 0 lines makes the picture roll like a badly tuned TV, so the
+// bounce buffer is not optional here.
 #ifndef LCD_BOUNCE_LINES
-#define LCD_BOUNCE_LINES 16
+#define LCD_BOUNCE_LINES 24
 #endif
 
 // -------------------------------------------------------- pixel clock source

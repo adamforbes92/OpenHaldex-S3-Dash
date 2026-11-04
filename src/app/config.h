@@ -47,6 +47,13 @@ struct Data {
   uint16_t pollLiveMs;
   uint16_t pollDashMs;
   uint16_t staleMs;
+
+  // 1 = skip DHCP and go straight to the static address. Learnt at runtime:
+  // set after the first successful static join, because the C6's AP leases no
+  // address while it also sits on a home LAN with the same 192.168.1.0/24.
+  // Waiting 15 s for a lease that never comes costs 15 s of a blank dashboard
+  // on every boot and on every reconnect.
+  uint8_t netUseStatic;
 };
 
 /// Load from NVS (or defaults + any build-time secrets on first boot).

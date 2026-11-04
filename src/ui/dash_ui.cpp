@@ -79,6 +79,11 @@ bool g_flashOn = false;
 
 // 0xFFFF = draw everything (see dash_ui.h).
 uint16_t g_dbgMask = 0xFFFF;
+
+// Bench counters for "the screen went stale": how often, and how old the data
+// was when it did.
+uint32_t g_staleEvents = 0;
+uint32_t g_maxStaleAgeMs = 0;
 bool dbg(uint16_t bit) { return (g_dbgMask & bit) != 0; }
 
 uint32_t g_tachUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
@@ -1129,6 +1134,25 @@ void tick() {
   const telemetry::Live l = telemetry::live();
   const telemetry::Dash d = telemetry::dash();
   const bool stale = !telemetry::liveFresh(c.staleMs);
+  // The screen's own idea of "stale" is what the user sees, so make every
+  // transition visible on the console together with how old the data was.
+  static bool lastStale = false;
+  static uint32_t staleEvents = 0;
+  static uint32_t maxAgeMs = 0;
+  g_maxStaleAgeMs = maxAgeMs;
+  if (stale) {
+    const uint32_t age = telemetry::live().ageMs;
+    if (age != UINT32_MAX && age > maxAgeMs) maxAgeMs = age;
+  }
+  if (stale != lastStale) {
+    lastStale = stale;
+    if (stale) {
+      staleEvents++;
+      g_staleEvents = staleEvents;
+    }
+    Serial.printf("[ui] %s (live data age %lu ms, event %lu)\n", stale ? "STALE" : "LIVE",
+                  (unsigned long)telemetry::live().ageMs, (unsigned long)staleEvents);
+  }
   g_stale = stale;
 
   // Targets -> interpolated values.
@@ -1179,6 +1203,9 @@ void tick() {
   g_connUs += t3 - t2;
   g_calls++;
 }
+
+uint32_t staleEvents() { return g_staleEvents; }
+uint32_t maxStaleAgeMs() { return g_maxStaleAgeMs; }
 
 void setDebugMask(uint16_t mask) {
   const bool wasHidden = g_dbgHideAll;

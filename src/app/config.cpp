@@ -19,7 +19,7 @@ namespace {
 constexpr const char *kNamespace = "ohxdash";
 constexpr const char *kKey = "cfg";
 constexpr uint32_t kMagic = 0x4F485844;  // 'OHXD'
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 3;  // 3: + netUseStatic; 2: staleMs 500 -> 1500
 
 struct Blob {
   uint32_t magic;
@@ -72,7 +72,11 @@ void setDefaults() {
 
   d.pollLiveMs = 100;
   d.pollDashMs = 1000;
-  d.staleMs = 500;
+  // 1.5 s, not the 500 ms the web page uses: over WiFi a single request can
+  // legitimately take a few hundred milliseconds, and at 500 ms that showed
+  // up as the stale overlay flashing on a link that was working fine.
+  d.staleMs = 1500;
+  d.netUseStatic = 0;
 
   apply(d);
 }
@@ -139,6 +143,7 @@ void apply(const Data &in) {
   d.pollLiveMs = (uint16_t)clampv<int>(d.pollLiveMs, 50, 1000);
   d.pollDashMs = (uint16_t)clampv<int>(d.pollDashMs, 250, 2000);
   d.staleMs = (uint16_t)clampv<int>(d.staleMs, 200, 5000);
+  d.netUseStatic = d.netUseStatic ? 1 : 0;
 
   bool changed = false;
   taskENTER_CRITICAL(&g_mux);

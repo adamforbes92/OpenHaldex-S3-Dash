@@ -16,6 +16,8 @@
 
 #include <Arduino.h>
 #include <TAMC_GT911.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <Wire.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
@@ -40,7 +42,11 @@ Pca9557 g_expander;
 Status g_status = {false, 0, false, false, 0};
 bool g_backlightAttached = false;
 uint32_t g_pclkHz = LCD_PCLK_HZ;
+uint32_t g_bounceLines = LCD_BOUNCE_LINES;
 lcd_clock_source_t g_clkSrc = LCD_CLK_SRC_DEFAULT;
+// Kept so the frame buffers can be re-registered when the panel is rebuilt
+// with a different bounce depth ('b' on the serial console).
+lv_display_t *g_disp = nullptr;
 
 // ------------------------------------------------- LVGL <-> esp_lcd glue
 // LVGL renders into one of the two full-screen PSRAM buffers and calls this
@@ -49,6 +55,55 @@ lcd_clock_source_t g_clkSrc = LCD_CLK_SRC_DEFAULT;
 // flush_ready() below is only reached once the swap is safe; that is what
 // keeps the picture free of tearing.
 volatile uint32_t g_flushUs = 0;
+volatile uint32_t g_waitUs = 0;
+
+// The flush callback has to wait for the panel to actually take the buffer it
+// just handed over. Two things go wrong without that wait:
+//   1. LVGL calls the flush callback once per invalidated AREA and only swaps
+//      its buffers on the last one, so pushing on every call hands the panel
+//      half-updated frames and re-arms its DMA several times per frame.
+//   2. flush_ready() tells LVGL the buffer is free, so it immediately starts
+//      drawing into the other one - which the panel may still be scanning.
+// esp_lvgl_port solves both the same way: push only on the last call, block
+// until the panel reports the frame complete, then flush_ready.
+SemaphoreHandle_t g_frameSem = nullptr;
+volatile uint32_t g_vsyncCount = 0;
+
+bool IRAM_ATTR onPanelFrameDone(esp_lcd_panel_handle_t panel,
+                                const esp_lcd_rgb_panel_event_data_t *edata, void *ctx) {
+  (void)panel;
+  (void)edata;
+  (void)ctx;
+  g_vsyncCount++;
+  BaseType_t higherWoken = pdFALSE;
+  if (g_frameSem != nullptr) {
+    xSemaphoreGiveFromISR(g_frameSem, &higherWoken);
+  }
+  return higherWoken == pdTRUE;
+}
+
+// Which callback reports "this frame buffer is free" depends on the DMA path:
+// with a bounce buffer it is the bounce-frame one, without it the VSYNC.
+bool registerPanelCallbacks() {
+  if (g_frameSem == nullptr) {
+    g_frameSem = xSemaphoreCreateBinary();
+    if (g_frameSem == nullptr) {
+      Serial.println("[board] no semaphore for the frame handshake");
+      return false;
+    }
+  }
+  // on_vsync fires exactly once per frame, which is what makes the wait below
+  // equal to one panel frame (49 Hz -> 20.4 ms). on_frame_buf_complete was
+  // tried first and reported ~6 ms, i.e. it is not the per-frame boundary.
+  esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+  cbs.on_vsync = onPanelFrameDone;
+  const esp_err_t err = esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
+  if (err != ESP_OK) {
+    Serial.printf("[board] frame callbacks failed: %d\n", (int)err);
+    return false;
+  }
+  return true;
+}
 
 // The buffer that was handed over last, i.e. the one the panel is scanning
 // right now. Kept only so the debug dump below shows what is on the glass.
@@ -57,18 +112,18 @@ const void *g_displayedFb = nullptr;
 void displayFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *pxMap) {
   (void)area;
   const uint32_t t0 = micros();
-  g_displayedFb = pxMap;
-#if LCD_USE_DOUBLE_FB
-  // Whole-frame buffer: hand it to the panel, which starts scanning it at
-  // the next VSYNC.
-  esp_lcd_panel_draw_bitmap(g_panel, 0, 0, LCD_H_RES, LCD_V_RES, pxMap);
-#else
-  // Single frame buffer in DIRECT mode: LVGL has already drawn the dirty
-  // rectangles straight into the buffer the panel is scanning, so there is
-  // nothing to hand over. Calling draw_bitmap here would memcpy the entire
-  // 768 KB screen for no reason.
-  (void)pxMap;
-#endif
+  if (lv_display_flush_is_last(disp)) {
+    g_displayedFb = pxMap;
+    esp_lcd_panel_draw_bitmap(g_panel, 0, 0, LCD_H_RES, LCD_V_RES, pxMap);
+    const uint32_t t1 = micros();
+    if (g_frameSem != nullptr) {
+      // Drop a notification left over from an earlier frame, then wait for
+      // this one to be picked up. The timeout is only a deadlock guard.
+      xSemaphoreTake(g_frameSem, 0);
+      xSemaphoreTake(g_frameSem, pdMS_TO_TICKS(60));
+    }
+    g_waitUs += micros() - t1;
+  }
   g_flushUs += micros() - t0;
   lv_display_flush_ready(disp);
 }
@@ -117,7 +172,7 @@ bool configurePanel(const lcd_clock_source_t clkSrc) {
   // which starves the CPU of the memory bandwidth LVGL needs. The driver's
   // internal-SRAM bounce buffer makes those reads bursty; its depth is the
   // margin against a WiFi burst emptying it mid-frame.
-  cfg.bounce_buffer_size_px = LCD_H_RES * LCD_BOUNCE_LINES;
+  cfg.bounce_buffer_size_px = g_bounceLines ? LCD_H_RES * g_bounceLines : 0;
   cfg.sram_trans_align = 4;
   cfg.psram_trans_align = 64;
 
@@ -162,6 +217,7 @@ bool configurePanel(const lcd_clock_source_t clkSrc) {
   esp_lcd_panel_reset(g_panel);
   esp_lcd_panel_init(g_panel);
   esp_lcd_panel_disp_on_off(g_panel, true);
+  registerPanelCallbacks();
   g_pclkHz = LCD_PCLK_HZ;
   g_clkSrc = clkSrc;
   return true;
@@ -243,9 +299,9 @@ bool begin() {
   Serial.printf("[board] RGB panel up: %dx%d @ %u Hz pclk (%u Hz refresh, %s, %s), %d fb\n", LCD_H_RES,
                 LCD_V_RES, (unsigned)g_pclkHz, (unsigned)refreshHz(g_pclkHz),
                 clkSrcName(g_clkSrc), LCD_USE_PLL240M ? "exact" : "frac", LCD_FB_COUNT);
-  Serial.printf("[board] bounce buffer %d lines (%u B x2), PSRAM used %u B, heap %u B\n",
-                LCD_BOUNCE_LINES, (unsigned)(LCD_H_RES * LCD_BOUNCE_LINES * 2),
-                (unsigned)(psramBefore - ESP.getFreePsram()), (unsigned)ESP.getFreeHeap());
+  Serial.printf("[board] bounce buffer %u lines, PSRAM used %u B, heap %u B\n",
+                (unsigned)g_bounceLines, (unsigned)(psramBefore - ESP.getFreePsram()),
+                (unsigned)ESP.getFreeHeap());
 
   // Backlight on before the first frame so the panel never shows garbage.
   setBacklight(100);
@@ -274,6 +330,7 @@ bool begin() {
                          LV_DISPLAY_RENDER_MODE_DIRECT);
 #endif
   lv_display_set_default(disp);
+  g_disp = disp;
 
   // Touch shares the I2C bus, so it comes up after the reset sequence.
   g_touch.begin();
@@ -309,6 +366,12 @@ const Status &status() { return g_status; }
 uint32_t takeFlushMicros() {
   const uint32_t v = g_flushUs;
   g_flushUs = 0;
+  return v;
+}
+
+uint32_t takeWaitMicros() {
+  const uint32_t v = g_waitUs;
+  g_waitUs = 0;
   return v;
 }
 
@@ -355,6 +418,78 @@ void dumpFrame(int cols, int rows) {
 }
 
 uint32_t pclkHz() { return g_pclkHz; }
+
+/// Rebuild the RGB panel with a different bounce-buffer depth, reusing the
+/// same LVGL display. Used to A/B the two DMA paths on a real screen: the
+/// bounce buffer decouples the DMA from PSRAM latency but makes the flush
+/// asynchronous, and the direct path does the opposite.
+bool setBounceLines(uint32_t lines) {
+  if (g_disp == nullptr) return false;
+  if (lines > 60) lines = 60;
+  if (g_panel != nullptr) {
+    esp_lcd_panel_del(g_panel);
+    g_panel = nullptr;
+  }
+  const uint32_t keepClk = g_pclkHz;
+  const lcd_clock_source_t keepSrc = g_clkSrc;
+  g_bounceLines = lines;
+  if (!configurePanel(keepSrc)) {
+    Serial.println("[board] panel rebuild FAILED - display is down until reset");
+    return false;
+  }
+  (void)keepClk;
+  void *fb0 = nullptr;
+  void *fb1 = nullptr;
+  if (esp_lcd_rgb_panel_get_frame_buffer(g_panel, LCD_FB_COUNT, &fb0, &fb1) != ESP_OK || !fb0) {
+    Serial.println("[board] rebuild: no frame buffer");
+    return false;
+  }
+  lv_display_set_buffers(g_disp, fb0, (LCD_FB_COUNT > 1) ? fb1 : nullptr,
+                         LCD_H_RES * LCD_V_RES * sizeof(lv_color_t),
+                         LV_DISPLAY_RENDER_MODE_DIRECT);
+  // Both buffers now hold stale pixels; repaint everything.
+  lv_obj_invalidate(lv_screen_active());
+  Serial.printf("[board] panel rebuilt: bounce %u lines, pclk %u Hz, heap %u B\n", (unsigned)lines,
+                (unsigned)g_pclkHz, (unsigned)ESP.getFreeHeap());
+  return true;
+}
+
+uint32_t bounceLines() { return g_bounceLines; }
+
+uint32_t takeVsyncCount() {
+  const uint32_t v = g_vsyncCount;
+  g_vsyncCount = 0;
+  return v;
+}
+
+// How much PSRAM bandwidth is actually available. The RGB panel reads
+// 800x480x2 B at 49 Hz = 37.9 MB/s continuously, so if these numbers are not
+// comfortably above that, the panel's DMA is competing with the CPU for the
+// same memory - which is the difference between a stable picture and one that
+// rolls. Buffers are large enough (256 KB) to swamp the cache.
+void psramBandwidthProbe() {
+  const size_t bytes = 256 * 1024;
+  uint8_t *a = (uint8_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  uint8_t *b = (uint8_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if (a == nullptr || b == nullptr) {
+    Serial.println("[board] PSRAM bandwidth probe skipped (no memory)");
+    if (a) heap_caps_free(a);
+    if (b) heap_caps_free(b);
+    return;
+  }
+  memset(a, 0x5A, bytes);
+  const uint32_t t0 = micros();
+  memset(b, 0xA5, bytes);
+  const uint32_t t1 = micros();
+  memcpy(a, b, bytes);
+  const uint32_t t2 = micros();
+  const float writeMBs = (float)bytes / (float)(t1 - t0);
+  const float copyMBs = (float)bytes / (float)(t2 - t1);
+  Serial.printf("[board] PSRAM: %.0f MB/s write, %.0f MB/s copy (panel needs ~38 MB/s)\n",
+                writeMBs, copyMBs);
+  heap_caps_free(a);
+  heap_caps_free(b);
+}
 
 /// Pixel clock of the RGB peripheral and its estimated refresh rate.
 const char *clkSrcName() { return clkSrcName(g_clkSrc); }

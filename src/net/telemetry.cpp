@@ -95,8 +95,11 @@ bool wifiEnsureConnected() {
   if (wifiLinkUp() && !revisionChanged) return true;
 
   const uint32_t now = millis();
-  if (!revisionChanged && lastAttempt != 0 && (uint32_t)(now - lastAttempt) < 10000) {
-    return false;  // back off: retry at most every 10 s
+  // A bounced access point should be back within a couple of seconds. The
+  // C6 briefly drops its own AP on a mode change, and a 10 s backoff on top
+  // of the join turned that into half a minute of a stale dashboard.
+  if (!revisionChanged && lastAttempt != 0 && (uint32_t)(now - lastAttempt) < 3000) {
+    return false;  // back off: retry at most every 3 s
   }
   lastAttempt = now;
   lastRevision = rev;
@@ -122,10 +125,21 @@ bool wifiEnsureConnected() {
     WiFi.setMinSecurity(WIFI_AUTH_OPEN);
   }
 
+  // Learned from an earlier join: DHCP never completes against this AP, so go
+  // straight to a static address instead of spending 15 s finding out again.
+  const bool preferStatic = cfg::get().netUseStatic != 0;
+  IPAddress hostIp;
+  if (preferStatic && hostIp.fromString(host)) {
+    const IPAddress staticIp(hostIp[0], hostIp[1], hostIp[2], kStaticLastOctet);
+    WiFi.config(staticIp, hostIp, IPAddress(255, 255, 255, 0));
+    Serial.printf("[net] static %s (no DHCP on this access point)\n",
+                  staticIp.toString().c_str());
+  }
+
   Serial.printf("[net] joining \"%s\" (password %s)\n", ssid, pass[0] ? "set" : "empty");
   WiFi.begin(ssid, pass[0] ? pass : nullptr);
 
-  bool up = waitForJoin(15000);
+  bool up = waitForJoin(preferStatic ? 8000 : 15000);
 
   // Associated but never leased an address. That is what happens when the
   // OpenHaldex-C6 is also sitting on a home LAN that already uses
@@ -134,7 +148,6 @@ bool wifiEnsureConnected() {
   // Falling back to a static address in the host's subnet skips DHCP
   // entirely, which is also what a fixed install in a car wants.
   if (!up && wifiAssociated()) {
-    IPAddress hostIp;
     if (hostIp.fromString(host)) {
       const IPAddress staticIp(hostIp[0], hostIp[1], hostIp[2], kStaticLastOctet);
       Serial.printf("[net] associated but no DHCP lease - retrying with static %s\n",
@@ -144,6 +157,13 @@ bool wifiEnsureConnected() {
         delay(100);
         WiFi.begin(ssid, pass[0] ? pass : nullptr);
         up = waitForJoin(8000);
+        if (up && !preferStatic) {
+          cfg::Data d = cfg::get();
+          d.netUseStatic = 1;
+          cfg::apply(d);
+          lastRevision = cfg::revision();  // our own write, not a user edit
+          Serial.println("[net] remembered: use a static address from now on");
+        }
       } else {
         Serial.println("[net] WiFi.config() refused the static address");
       }
@@ -226,6 +246,22 @@ int fetchJson(HTTPClient &http, bool &ready, const char *path, uint16_t timeoutM
   return code;
 }
 
+// A poll that fails is worth one line, not one per attempt: without this the
+// serial console turns into a wall of text on a link that has gone bad, and
+// the interesting part (which code, how long) gets lost.
+void logPollFailure(const char *what, int code) {
+  static uint32_t lastLog = 0;
+  static int lastCode = 0;
+  const uint32_t now = millis();
+  if (code == lastCode && (uint32_t)(now - lastLog) < 5000) return;
+  lastLog = now;
+  lastCode = code;
+  Serial.printf("[net] %s failed: %d (%s)\n", what, code,
+                code == -1 ? "not connected"
+                           : code == -2 ? "bad JSON"
+                                        : code > 0 ? "HTTP status" : "transport");
+}
+
 void pollLive() {
   static JsonDocument doc;
   uint16_t tmo = (uint16_t)(cfg::get().pollLiveMs * 3);
@@ -252,6 +288,7 @@ void pollLive() {
     g_stats.liveOk++;
     taskEXIT_CRITICAL(&g_mux);
   } else {
+    logPollFailure("/api/live", code);
     taskENTER_CRITICAL(&g_mux);
     g_stats.liveFail++;
     taskEXIT_CRITICAL(&g_mux);
@@ -291,11 +328,17 @@ void pollDash() {
     g_stats.dashOk++;
     taskEXIT_CRITICAL(&g_mux);
   } else {
+    logPollFailure("/api/dashboard", code);
     taskENTER_CRITICAL(&g_mux);
     g_stats.dashFail++;
     taskEXIT_CRITICAL(&g_mux);
   }
 }
+
+// Set from the serial console: keeps the link up but stops asking for data,
+// so the cost of our own requests can be separated from the radio having to
+// receive everything else on the channel.
+volatile bool g_paused = false;
 
 void netTask(void *) {
   // Let USB enumeration and the panel come up first.
@@ -307,6 +350,11 @@ void netTask(void *) {
   for (;;) {
     if (!wifiEnsureConnected()) {
       vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    if (g_paused) {
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
 
@@ -336,6 +384,11 @@ void netTask(void *) {
 }
 
 }  // namespace
+
+void setPaused(bool paused) {
+  g_paused = paused;
+  Serial.printf("[net] polling %s\n", paused ? "PAUSED" : "resumed");
+}
 
 void begin() {
   g_live = Live{NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, false, UINT32_MAX};

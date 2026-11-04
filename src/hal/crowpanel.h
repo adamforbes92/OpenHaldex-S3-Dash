@@ -33,6 +33,17 @@ uint32_t psramFree();
 /// "handing the frame to the panel is slow".
 uint32_t takeFlushMicros();
 
+/// Microseconds of the above that were spent waiting for the panel to take
+/// the frame (the VSYNC handshake), then resets it.
+uint32_t takeWaitMicros();
+
+/// VSYNC events since the last call, then resets the counter. The panel
+/// refresh rate is this divided by the interval.
+uint32_t takeVsyncCount();
+
+/// Print measured PSRAM write/copy bandwidth (bench aid for DMA starvation).
+void psramBandwidthProbe();
+
 /// Live PCLK of the RGB peripheral, its source, and the refresh rate that
 /// follows from the porch values, for logging.
 uint32_t pclkHz();
@@ -43,6 +54,11 @@ const char *clkSrcName();
 /// VSYNC). The panel's PSRAM read bandwidth scales with it, so this is the
 /// handle for chasing DMA starvation without a reflash. 5..30 MHz.
 bool setPclk(uint32_t hz);
+
+/// Rebuild the panel with a different bounce-buffer depth (0 = the DMA
+/// streams PSRAM directly). Returns false if the rebuild failed.
+bool setBounceLines(uint32_t lines);
+uint32_t bounceLines();
 
 /// Print the frame buffer the panel is currently scanning as an ASCII
 /// luminance map (cols x rows cells). Bench aid: it shows what the screen

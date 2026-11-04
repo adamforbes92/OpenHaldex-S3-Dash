@@ -79,4 +79,9 @@ bool liveFresh(uint32_t staleMs);
 /// Force a reconnect + interval reset (called after settings change).
 void restart();
 
+/// Stop/start the HTTP polling without dropping the association, so the cost
+/// of our own requests can be told apart from the radio receiving everything
+/// else on the channel.
+void setPaused(bool paused);
+
 }  // namespace telemetry

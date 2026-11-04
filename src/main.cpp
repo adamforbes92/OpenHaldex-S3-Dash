@@ -34,6 +34,33 @@ uint32_t g_renderUs = 0;
 
 void printBanner() {
   Serial.println();
+  // The prebuilt IDF libraries carry their own configuration; these values
+  // decide the memory bandwidth the RGB panel has to share, so print them
+  // rather than assume.
+#ifdef CONFIG_SPIRAM_MODE_OCT
+  const char *psramMode = "octal";
+#elif defined(CONFIG_SPIRAM_MODE_QUAD)
+  const char *psramMode = "quad";
+#else
+  const char *psramMode = "?";
+#endif
+#if defined(CONFIG_SPIRAM_SPEED_120M)
+  const int psramMHz = 120;
+#elif defined(CONFIG_SPIRAM_SPEED_80M)
+  const int psramMHz = 80;
+#elif defined(CONFIG_SPIRAM_SPEED_40M)
+  const int psramMHz = 40;
+#else
+  const int psramMHz = 0;
+#endif
+  Serial.printf(" psram cfg: %s %d MHz", psramMode, psramMHz);
+#ifdef CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+  Serial.print(", wifi/lwip buffers in PSRAM");
+#endif
+#ifdef CONFIG_LCD_RGB_RESTART_IN_VSYNC
+  Serial.print(", rgb restart in vsync");
+#endif
+  Serial.println();
   Serial.println("=========================================");
   Serial.println(" OpenHaldex S3 Dash");
   Serial.printf(" board    : %s\n", BOARD_NAME);
@@ -59,17 +86,27 @@ void printStats() {
                 s.wifiUp ? "up" : "DOWN", (int)s.rssi, (s.ip >> 0) & 0xFF, (s.ip >> 8) & 0xFF,
                 (s.ip >> 16) & 0xFF, (s.ip >> 24) & 0xFF, c.host, c.port, c.pollLiveMs,
                 c.pollDashMs);
+  if (ui::staleEvents() > 0) {
+    Serial.printf("[stats] stale overlay shown %lu time(s), oldest data %lu ms\n",
+                  (unsigned long)ui::staleEvents(), (unsigned long)ui::maxStaleAgeMs());
+  }
   const ui::Timings t = ui::takeTimings();
   const uint32_t flushUs = crowpanel::takeFlushMicros();
+  const uint32_t waitUs = crowpanel::takeWaitMicros();
+  const uint32_t vsyncs = crowpanel::takeVsyncCount();
   const uint32_t n = t.calls ? t.calls : 1;
   Serial.printf("[stats] ms/tick: tach %.2f readouts %.2f conn %.2f  (mask 0x%04X)\n",
                 (t.tachUs / 1000.0f) / n, (t.readoutsUs / 1000.0f) / n,
                 (t.connUs / 1000.0f) / n, ui::debugMask());
-  Serial.printf("[stats] render %.1f fps | %.1f ms/loop | %.2f ms/flush | heap %u B, psram %u B\n",
-                g_frames * 1000.0f / 5000.0f,
-                (g_renderUs / 1000.0f) / (g_frames ? g_frames : 1),
-                (flushUs / 1000.0f) / (g_frames ? g_frames : 1), (unsigned)ESP.getFreeHeap(),
-                (unsigned)ESP.getFreePsram());
+  // "ms/wait" is the VSYNC handshake: it should be one panel frame
+  // (1000/49 = 20.4 ms), and every push should be a whole frame.
+  Serial.printf(
+      "[stats] render %.1f fps | %.1f ms/loop | %.2f ms/flush (%.2f ms/wait) | vsync %.0f/s | "
+      "heap %u B, psram %u B\n",
+      g_frames * 1000.0f / 5000.0f, (g_renderUs / 1000.0f) / (g_frames ? g_frames : 1),
+      (flushUs / 1000.0f) / (g_frames ? g_frames : 1),
+      (waitUs / 1000.0f) / (g_frames ? g_frames : 1), vsyncs / 5.0f,
+      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
   g_frames = 0;
   g_renderUs = 0;
 }
@@ -106,16 +143,36 @@ void handleSerial() {
                       ok ? "accepted" : "REJECTED", (unsigned)crowpanel::refreshHzNow());
         break;
       }
+      case 'b': {
+        // 0 lines = the RGB DMA reads PSRAM directly (Elecrow's own path);
+        // 16 = the driver prefetches into internal SRAM.
+        const uint32_t next = crowpanel::bounceLines() ? 0 : 16;
+        Serial.printf("[dbg] rebuilding panel with bounce=%u lines ...\n", (unsigned)next);
+        const bool ok = crowpanel::setBounceLines(next);
+        Serial.printf("[dbg] bounce=%u %s, flush %.2f ms\n", (unsigned)crowpanel::bounceLines(),
+                      ok ? "ok" : "FAILED", (double)crowpanel::takeFlushMicros() / 1000.0);
+        continue;
+      }
       case 'd':
         Serial.printf("[dump] frame the panel is scanning -> %dx%d cells\n", LCD_H_RES, LCD_V_RES);
         crowpanel::dumpFrame(120, 36);
         break;
+      case 'n':
+        // Pause/resume the HTTP polling with the link still up: if the frame
+        // rate recovers, our own requests are the cost; if it does not, the
+        // radio receiving the rest of the channel is.
+        {
+          static bool paused = false;
+          paused = !paused;
+          telemetry::setPaused(paused);
+        }
+        continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk d=dump");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling");
         break;
       default: continue;
     }
-    if (c == 'p' || c == 'd') continue;  // clock/dump are not redraw-mask toggles
+    if (c == 'p' || c == 'd' || c == 'b') continue;  // clock/bounce/dump are not mask toggles
     ui::setDebugMask(g_mask);
     Serial.printf("[dbg] mask=0x%04X\n", g_mask);
   }
@@ -140,6 +197,8 @@ void setup() {
     Serial.println("[main] display bring-up FAILED - running headless");
   }
 
+  // Measured with the panel already scanning, which is the number that matters.
+  crowpanel::psramBandwidthProbe();
   telemetry::begin();   // network task on core 0
 
   Serial.println("[main] ready");
