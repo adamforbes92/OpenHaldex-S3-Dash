@@ -18,6 +18,7 @@
 #include "board_config.h"
 #include "hal/crowpanel.h"
 #include "net/telemetry.h"
+#include "net/ohx_now.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
 
@@ -31,6 +32,7 @@ uint32_t g_lastUiMs = 0;
 uint32_t g_lastStatsMs = 0;
 uint32_t g_frames = 0;
 uint32_t g_renderUs = 0;
+uint32_t g_busyUs = 0;   // the whole loop body, so the sleep cannot hide anything
 
 void printBanner() {
   Serial.println();
@@ -90,6 +92,21 @@ void printStats() {
     Serial.printf("[stats] live data went stale %lu time(s), oldest data %lu ms\n",
                   (unsigned long)ui::staleEvents(), (unsigned long)ui::maxStaleAgeMs());
   }
+#if OHX_USE_ESP_NOW
+  // Phase 1: side by side with the HTTP numbers, but nothing on the glass
+  // comes from here yet.
+  {
+    const ohxnow::Stats n = ohxnow::stats();
+    if (n.enabled) {
+      Serial.printf("[stats] esp-now %lu pkt (%.1f Hz), age %s, rej %lu dup %lu gap %lu, "
+                    "ch %u, rssi %d dBm\n",
+                    (unsigned long)n.packets, (double)n.hz,
+                    n.ageMs == UINT32_MAX ? "never" : "live", (unsigned long)n.rejects,
+                    (unsigned long)n.duplicates, (unsigned long)n.gaps, (unsigned)n.channel,
+                    (int)n.rssi);
+    }
+  }
+#endif
   const ui::Timings t = ui::takeTimings();
   const uint32_t flushUs = crowpanel::takeFlushMicros();
   const uint32_t waitUs = crowpanel::takeWaitMicros();
@@ -98,17 +115,20 @@ void printStats() {
   Serial.printf("[stats] ms/tick: tach %.2f readouts %.2f conn %.2f  (mask 0x%04X)\n",
                 (t.tachUs / 1000.0f) / n, (t.readoutsUs / 1000.0f) / n,
                 (t.connUs / 1000.0f) / n, ui::debugMask());
-  // "ms/wait" is the VSYNC handshake: it should be one panel frame
-  // (1000/49 = 20.4 ms), and every push should be a whole frame.
+  // "ms/loop" is the render only; "ms/busy" is the whole loop body minus the
+  // sleep. They should be the same number: if they ever drift apart, something
+  // outside LVGL is blocking.
   Serial.printf(
-      "[stats] render %.1f fps | %.1f ms/loop | %.2f ms/flush (%.2f ms/wait) | vsync %.0f/s | "
-      "heap %u B, psram %u B\n",
+      "[stats] render %.1f fps | %.2f ms/loop, %.2f ms/busy of a %.1f ms period | "
+      "%.2f ms/flush (%.2f ms/wait) | vsync %.0f/s | heap %u B, psram %u B\n",
       g_frames * 1000.0f / 5000.0f, (g_renderUs / 1000.0f) / (g_frames ? g_frames : 1),
+      (g_busyUs / 1000.0f) / (g_frames ? g_frames : 1), 5000.0f / (g_frames ? g_frames : 1),
       (flushUs / 1000.0f) / (g_frames ? g_frames : 1),
       (waitUs / 1000.0f) / (g_frames ? g_frames : 1), vsyncs / 5.0f,
       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
-  g_frames = 0;
+  g_busyUs = 0;
   g_renderUs = 0;
+  g_frames = 0;
 }
 
 // ---- bring-up console -------------------------------------------------
@@ -168,8 +188,23 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now");
         break;
+      case 'e':
+#if OHX_USE_ESP_NOW
+        ohxnow::printCompare();
+#else
+        Serial.println("[now] built without OHX_USE_ESP_NOW");
+#endif
+        continue;
+      case 'E':
+        // A/B on one boot: does listening cost the render rate?
+        {
+          const bool on = !ohxnow::enabled();
+          Serial.printf("[now] %s listener ...\n", on ? "enabling" : "disabling");
+          ohxnow::setEnabled(on);
+        }
+        continue;
       default: continue;
     }
     if (c == 'p' || c == 'd' || c == 'b') continue;  // clock/bounce/dump are not mask toggles
@@ -206,7 +241,12 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  const uint32_t loopStart = micros();
   handleSerial();
+
+#if OHX_USE_ESP_NOW
+  ohxnow::poll();  // no-op until WiFi is up; prints the first packet's decode
+#endif
 
   if ((uint32_t)(now - g_lastUiMs) >= kUiPeriodMs) {
     g_lastUiMs = now;
@@ -222,9 +262,9 @@ void loop() {
     g_lastStatsMs = now;
     printStats();
   }
-
   // Sleep until LVGL wants to run again, but never longer than one panel
   // frame and never zero (the idle task still needs to run).
+  g_busyUs += micros() - loopStart;
   uint32_t waitMs = next < 1 ? 1 : (next > 20 ? 20 : next);
   delay(waitMs);
 }

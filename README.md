@@ -270,8 +270,8 @@ Data the C6's HTTP API does not expose, so it is **not** on this dashboard:
 * Engine oil **pressure**, fuel pressure, individual wheel speeds.
 * Gear position, clutch state (the browser page does not show these either).
 * Battery voltage — this *is* available, but only in the `OHX_STATUS`
-  ESP-NOW broadcast (`supplyMv`), not over HTTP. A future version can add it
-  by also listening on ESP-NOW (see §9).
+  ESP-NOW broadcast (`supplyMv`), not over HTTP. The dash now receives it
+  (§9); it just has no space on the layout yet.
 * Anything at all while `chassisCAN` is false: on the bench with no vehicle
   CAN the C6 reports `rpm`/`speed`/`throttle`/`boost` as JSON `null`, and
   this firmware correctly shows `--`.
@@ -352,6 +352,9 @@ source is printed at boot, and `p` on the serial console steps the clock down
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
 | `n` | pause / resume the HTTP polling (lets a stale transition be staged on the bench) |
 | `b` | toggle the bounce buffer between 0 and 16 lines |
+| `e` | ESP-NOW vs HTTP, every field side by side |
+| `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
+| `h` | the list above |
 
 `d` is the bench substitute for a camera: `tools/serial_cmd.py d 34` shows
 what is on the glass, which is how the layout was verified without a screen
@@ -367,22 +370,60 @@ in one place.
 
 ---
 
-## 9. Roadmap
+## 9. ESP-NOW (phase 1: listening)
+
+The C6 already broadcasts a packed `OhxStatus` struct to the broadcast address
+every 100 ms (`OHX_STATUS_MS`) with **no web stack involved** — no access
+point association, no sockets, no HTTP. This firmware now listens to it and
+prints it beside the HTTP values, but **nothing on the glass comes from it
+yet**: HTTP is still the only source of truth, so a mistake here cannot make
+the display wrong, only the console noisy.
+
+| | |
+|---|---|
+| Wire format | `include/ohx_proto.h`, a **verbatim copy** of the C6's shared header (`b54d9a1d`, sha256 `9f1a6351...`). Refresh it from upstream; never edit it. |
+| Listener | `src/net/ohx_now.{h,cpp}` — init, receive callback, decode, counters |
+| Build switch | `-DOHX_USE_ESP_NOW=1`; `0` removes the calls from `main.cpp` |
+| Console | `e` = every field, ESP-NOW beside HTTP. `E` = enable/disable at runtime |
+| Stats line | `[stats] esp-now 418 pkt (9.7 Hz), age live, rej 0 dup 0 gap 3, ch 1, rssi -33 dBm` |
+
+Measured on the bench: 84-byte packets, magic/type/proto all matching, decoded
+field by field against the raw hexdump, 9.7-10.6 Hz sustained, 0 rejects and
+~0.5 % sequence gaps (broadcast has no retransmission, so that is expected).
+A/B on one boot with `E` shows the listener costs **nothing** in render rate:
+16.2-16.4 fps either way, and the loop is ~60.2 ms busy out of a 61.0 ms
+period.
+
+The bench has no CAN, so every fast value arrives as "no data" (both
+transports agree on that), and `mode` / `lockTarget` are the fields that can
+be cross-checked today — pressing the mode button on the OpenHaldex unit moves
+both sources together. The remaining values get validated in the car, where
+`e` puts the two transports side by side.
+
+Full plan, risks and the phase 1 write-up:
+[`docs/esp-now-plan.md`](docs/esp-now-plan.md).
+
+---
+
+## 10. Roadmap
 
 The first item has a full plan in [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
 
 
-1. **ESP-NOW `OHX_STATUS` as the primary transport.** The C6 already
-   broadcasts a richer packet every 100 ms (`OHX_STATUS_MS`) including
-   battery voltage, clutch temperature, module temperature and the Haldex
-   slip array — with no web stack, no sockets and no HTTP parsing. HTTP
-   would stay only for the engine temps, which ESP-NOW does not carry.
+1. **ESP-NOW `OHX_STATUS` as the primary transport.** *Phase 1 done* — the
+   packet is received, decoded and cross-checked against HTTP (§9). Phase 2 is
+   the switchover: take `rpm` / `speed` / `boost` / `throttle` / `lock*` (and
+   the free extras: clutch, module and oil temperatures, battery voltage,
+   per-wheel slip, steering) from the packet, leave coolant on a slow HTTP
+   poll, point staleness at the packet age, then walk the pixel clock back up
+   (16 -> 20 -> 24 MHz) with the PSRAM the HTTP traffic was eating. Phase 3
+   would add mode commands from the touchscreen (signed, and off by default).
 2. Battery voltage readout once ESP-NOW is in.
 3. Config backup/restore over a small local web page served by the S3.
 
 ---
 
-## 10. Layout of this repo
+## 11. Layout of this repo
 
 ```
 platformio.ini              build: ESP32-S3, OPI PSRAM, 4 MB OTA layout
@@ -392,6 +433,8 @@ include/
   board_config.h            panel pins, timing, I2C, expander, touch
   theme.h                   palette, fonts, all layout constants
   lv_conf.h                 LVGL v9 config (partial; defaults fill the rest)
+  ohx_proto.h               ESP-NOW wire format - verbatim copy of the C6's
+                            shared header; refresh from upstream, never edit
   wifi_secrets.h.example    optional bench credentials
 
 src/
@@ -401,6 +444,7 @@ src/
     pca9557.h/.cpp          expander driver + I2C probe
   net/
     telemetry.h/.cpp        WiFi + /api/live + /api/dashboard, core 0 task
+    ohx_now.h/.cpp          ESP-NOW listener: decode + counters (phase 1)
   sys/
     config.h/.cpp           NVS-backed settings, validation, revision counter
   ui/
@@ -411,7 +455,7 @@ src/
 
 ---
 
-## 11. Verification status
+## 12. Verification status
 
 | Item | Status |
 |---|---|
@@ -423,13 +467,16 @@ src/
 | Link to a live C6 | **done** — `/api/live` at 10 Hz and `/api/dashboard` at 1 Hz, `live 57 ok / 2 fail` over 30 s |
 | Tearing / jitter fixed | **done** — visually confirmed stable. Two frame buffers + DIRECT mode, push only on `lv_display_flush_is_last()`, flush_ready only after the panel's frame callback, PLL_D2 clock, 24-line bounce buffer, pclk 16 MHz |
 | Live data on screen | **done** — `/api/live` at 10 Hz; mode changes made on the OpenHaldex unit show up on the dash |
+| Stale behaviour | **done** — the data stays on the glass and only the status light changes; proved by diffing frame dumps (§8) |
+| ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate; HTTP is still the source of truth (§9) |
+| ESP-NOW drives the dashboard (phase 2) | not yet |
 | On-car test | not yet |
 
 Build result:
 
 ```
-RAM:   152 684 / 327 680 B   (46.6%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 616 438 / 1 966 080 B (82.2%) <- of the 1.875 MB OTA slot
+RAM:   153 212 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 632 274 / 1 966 080 B (83.0%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly

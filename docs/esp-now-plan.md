@@ -1,7 +1,8 @@
 # Plan: take the live data over ESP-NOW instead of HTTP
 
-Status: **proposal, nothing implemented yet.** Written so the steps and the
-risks are reviewable before any code changes.
+Status: **Phase 1 implemented and verified on the bench** (see §7). Phases
+2-3 are still proposals. Written so the steps and the risks are reviewable
+before any code changes.
 
 ## 1. What ESP-NOW is, in plain terms
 
@@ -139,3 +140,81 @@ Nothing changes on screen; HTTP stays the source of truth.
 * How much of the settings UI moves to ESP-NOW later (safe read-only first).
 * Whether the battery voltage / per-wheel slip / steering angle should earn
   space on the dashboard, since they arrive for free.
+
+---
+
+## 7. Phase 1 as built (what actually happened)
+
+Delivered as a listen-only receiver that cannot affect the glass.
+**HTTP is still the only source of truth**; nothing on screen comes from
+ESP-NOW yet.
+
+### Files
+
+| File | Role |
+|---|---|
+| `include/ohx_proto.h` | **Verbatim copy** of the C6's shared wire-format header (magic, types, sentinels, flags, structs). Taken from `Forbes-Automotive/OpenHaldex-C6 @ b54d9a1d`, sha256 `9f1a6351c8b5fe34...`. Do not edit it: refresh it from upstream. |
+| `src/net/ohx_now.{h,cpp}` | The listener: init, receive callback, decode, counters, printing. |
+| `platformio.ini` | `-DOHX_USE_ESP_NOW=1` switches the calls in `main.cpp` in or out. |
+| `src/main.cpp` | `ohxnow::poll()` in the loop, an `[stats] esp-now ...` line, and the `e` / `E` console commands. |
+
+Re-typing the struct was the plan's step 3; taking upstream's header instead
+is strictly better, because the layout is then guaranteed identical rather
+than merely asserted similar. Upstream already keeps two byte-identical copies
+of this file in its own repo, so a third copy is the intended pattern.
+
+### Verified on the bench (no car attached, so no CAN data)
+
+```
+[now] listening: peer added (0), own mac 44:1B:F6:8B:07:98, station channel 1
+[now] first OHX_STATUS: 84 bytes from DC:1E:D5:82:8B:79 rssi -30 dBm, channel 1 (station is on 1)
+  header  : magic OH type 1 proto 1, fw 11.0.4, generation 1
+  seq 129  nonce 88337fab  name 'OpenHaldex-C6'  struct 84 bytes (ours 84)
+  flags   : CTRL_ACCEPT
+  mode    : 4 (75:25), haldexState 0
+```
+
+* **Layout confirmed byte for byte.** The raw hexdump was walked against the
+  upstream header field by field: every offset, sentinel (`0xFFFF`, `0xFF`,
+  `0x8000` for temperatures, `-128` for slip) and the `name` string landed
+  where the header says. `sizeof(OhxStatus)` is 84 on both sides.
+* **Rate and loss:** 9.7-10.6 Hz sustained (the C6's period is 100 ms), 0
+  rejects, 0 duplicates, 0-3 sequence gaps per ~500 packets (~0.5%, expected:
+  broadcast has no retransmission).
+* **Channel strategy needed no scan after all.** We are associated to the
+  C6's own access point, so the station is already on its channel; the peer is
+  registered with channel `0` ("use the station's channel") and packets arrive
+  with `channel 1`, exactly matching `WiFi.channel()`. A boot scan is only
+  needed if we ever stop being associated.
+* **Listening is free.** A/B on one boot with the `E` toggle: 16.2-16.4 fps
+  with the listener on, 16.4 fps with it off, and the new
+  `%.2f ms/busy of a %.1f ms period` counters show ~60.2 ms of a 61.0 ms
+  period either way - the loop is entirely LVGL render plus the vsync wait.
+  ESP-NOW does not starve the panel.
+* **Cross-check with HTTP works.** Pressing the mode button on the OpenHaldex
+  unit moved `mode` in *both* sources together (`3` and `4` seen at different
+  times), and `lockTarget` agreed at `0.00`. `haldexState` differs in meaning
+  rather than value: the packet carries the raw Haldex status byte (`0`),
+  while the HTTP API reports `-1` for "unknown" when no CAN is present.
+
+### The one thing the bench cannot settle
+
+There is no CAN on the bench, so **every fast value arrives as a sentinel**
+(rpm/speed/boost/throttle are `none` on both ESP-NOW and HTTP) and
+`clutchTemp`/`oilTemp`/`moduleTemp`/`supplyMv` never get a real reading
+either. Their *scaling* is documented upstream (`tenths of a degree`,
+`mV`, `mbar above ambient`) but has not been seen on real data here. That is
+what `e` is for: in the car, `[now] ESP-NOW vs HTTP` puts the two transports
+side by side field by field, and any disagreement is visible before Phase 2
+lets the packet drive the glass.
+
+### Incidental find worth keeping
+
+The first-packet decode was originally re-armed whenever the flag was clear,
+so it printed for *every* packet. Twenty lines of hex at 115200 baud is ~87 ms
+of blocking UART per packet, which dragged the render rate from 16.4 to
+6.6 fps. It looked exactly like "ESP-NOW is expensive". Two fixes: dump once
+per boot (`g_firstSeen`), and the `ms/busy` counters above, which immediately
+showed the loop was 100% busy and so the cost was not in the loop at all but
+in serial output the loop was calling.
+
