@@ -284,6 +284,27 @@ been reworked or is a different revision:
 | Image tears or rolls | LVGL is drawing into the buffer being scanned: keep `LCD_USE_DOUBLE_FB 1` and `LV_DISPLAY_RENDER_MODE_DIRECT` |
 | Panel blank, no backlight | `PCA9557` not found — check the I2C scan line in the boot log |
 
+### The real limit here is PSRAM bandwidth
+
+Whatever else is tuned, this is the number that decides how the dash behaves.
+The panel reads its frame buffer out of PSRAM continuously, and this board
+measures only ~35-44 MB/s in total (19 MB/s of it left for the CPU while the
+panel is scanning):
+
+| pclk | refresh | panel needs |
+|---|---|---|
+| 24 MHz | 49 Hz | 37.9 MB/s - starves everything else |
+| 20 MHz | 41 Hz | 31.6 MB/s |
+| **16 MHz** | **33 Hz** | **25.3 MB/s - what this build uses** |
+| 12 MHz | 24.6 Hz | 19.0 MB/s |
+
+Two things make it worse: WiFi's buffers are allocated in PSRAM
+(`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, baked into the prebuilt IDF
+libraries), and the dashboard's own polling is enough to cost most of the
+frame rate - pausing it takes the render from 16 fps to 42 fps. Symptoms are
+easy to misread: with a starved DMA the whole image rolls, which looks like a
+badly tuned television rather than a software bug.
+
 ### Why two frame buffers, and why DIRECT mode
 
 LVGL renders into one full-screen PSRAM buffer while the RGB peripheral scans
@@ -383,7 +404,8 @@ src/
 | Firmware builds clean | **done** — see numbers below |
 | Panel / touch bring-up | **done** — RGB panel, GT911 and the PCA9557 all come up |
 | Link to a live C6 | **done** — `/api/live` at 10 Hz and `/api/dashboard` at 1 Hz, `live 57 ok / 2 fail` over 30 s |
-| Tearing / jitter fixed | **changed** — two frame buffers + DIRECT mode, exact 24 MHz divider, deeper bounce buffer; awaiting a visual re-check |
+| Tearing / jitter fixed | **done** — visually confirmed stable. Two frame buffers + DIRECT mode, push only on `lv_display_flush_is_last()`, flush_ready only after the panel's frame callback, PLL_D2 clock, 24-line bounce buffer, pclk 16 MHz |
+| Live data on screen | **done** — `/api/live` at 10 Hz; mode changes made on the OpenHaldex unit show up on the dash |
 | On-car test | not yet |
 
 Build result:
