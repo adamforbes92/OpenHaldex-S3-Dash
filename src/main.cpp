@@ -124,8 +124,8 @@ void printStats() {
   const uint32_t waitUs = crowpanel::takeWaitMicros();
   const uint32_t vsyncs = crowpanel::takeVsyncCount();
   const uint32_t n = t.calls ? t.calls : 1;
-  Serial.printf("[stats] ms/tick: tach %.2f readouts %.2f conn %.2f  (mask 0x%04X)\n",
-                (t.tachUs / 1000.0f) / n, (t.readoutsUs / 1000.0f) / n,
+  Serial.printf("[stats] ms/tick: bars %.2f readouts %.2f conn %.2f  (mask 0x%04X)\n",
+                (t.barsUs / 1000.0f) / n, (t.readoutsUs / 1000.0f) / n,
                 (t.connUs / 1000.0f) / n, ui::debugMask());
   // "ms/loop" is the render only; "ms/busy" is the whole loop body minus the
   // sleep. They should be the same number: if they ever drift apart, something
@@ -154,10 +154,10 @@ void handleSerial() {
   while (Serial.available() > 0) {
     const int c = Serial.read();
     switch (c) {
-      case '1': g_mask ^= 0x0001; break;  // zone arcs
-      case '2': g_mask ^= 0x0002; break;  // needle
-      case '3': g_mask ^= 0x0004; break;  // ticks + numbers
-      case '4': g_mask ^= 0x0008; break;  // rpm digits + shift lamp
+      case '1': g_mask ^= 0x0001; break;  // rev bar
+      case '2': g_mask ^= 0x0002; break;  // boost bar
+      case '3': g_mask ^= 0x0004; break;  // rev tick numbers
+      case '4': g_mask ^= 0x0008; break;  // big numbers (rpm, boost)
       case '5': g_mask ^= 0x0010; break;  // tile readouts
       case '6': g_mask ^= 0x0020; break;  // status bar
       case '0': g_mask = 0xFFFF; break;   // everything on

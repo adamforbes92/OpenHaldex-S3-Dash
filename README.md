@@ -46,7 +46,10 @@ nothing.
 
 ## 2. What it looks like
 
-The layout is a native port of `dash.html`, using the same geometry formula:
+The top band is **not** a port of `dash.html`: the tach ring, needle and ticks
+were replaced by two segmented bars and two large numbers, because on this
+board the ring was the entire frame budget (`docs/redesign-bars.md`). The band
+below it still follows the page's geometry formula:
 
 ```
 u = min(width / 100, height / 56)          -> 8 px at 800x480
@@ -54,26 +57,23 @@ u = min(width / 100, height / 56)          -> 8 px at 800x480
 
 ```
 +------------------------------------------------------------------+
-|                                                                  |
-|        .-''''''''''''''''''''-.            [SHIFT]                |
-|      .'   3  .  4  .  5  .  6  '.                                 |
-|     /  2                         7  \      tach ring:             |
-|    |                                 |       green  0 .. rpmAmber |
-|    |   2          6200         8     |       amber  .. rpmRedline |
-|     \  1        RPM      .-.      0 /        red    .. rpmMax     |
-|      '.     0          ( )        .'         needle + digits      |
-|        '-._____________.-._______'                                |
-+----------+----------+-------------+------------------------------+
-|  SPEED   |  BOOST   | TEMPERATURES|  HALDEX                      |
-|   123    |  1.25    | COOLANT  92 |  EXPERT                      |
-|          |  bar     | [========]  |  coupling closed             |
-|          | [======] | OIL     108 |  LOCK REQ   40%              |
-|          | peak 1.8 | [=======]   |  LOCK ACT   38%              |
-| peak 187 |          |             |  THR [===]                   |
-+----------+----------+-------------+------------------------------+
-| * LIVE   BRAKE HAND TC ASR AWD        RESET PEAKS  DAY  SETTINGS |
+| BOOST  [###############...............]                  1.55   |
+| REVS   [########################......]                 6800   |
+|        1   2   3   4   5   6   7   x1000                bar    |
++------------------+-----------------+---------------------------+
+|  SPEED           |  TEMPERATURES   |  HALDEX                    |
+|   123            |  COOLANT    92  |  EXPERT                    |
+|   km/h           |  [========]     |  coupling closed           |
+|   peak 187       |  OIL       108  |  LOCK REQ  40%             |
+|                  |  [=======]      |  LOCK ACT  38%             |
+|                  |                 |  THR [===]                 |
++------------------+-----------------+---------------------------+
+| * LIVE   BRAKE HAND TC ASR AWD        RESET PEAKS DAY SETTINGS    |
 +------------------------------------------------------------------+
 ```
+
+Boost appears once — as the white bar at the top plus the number beside it. The
+old BOOST tile is gone; showing the same value twice was duplication.
 
 Everything that cannot be measured shows `--`, never a fake zero: a JSON
 `null` from the C6 is carried all the way to the screen as "unknown".
@@ -82,19 +82,19 @@ Features carried over from the page: peak tracking, shift-light flash,
 day/night brightness, and a settings page with all the same thresholds.
 
 **Staleness only moves the status light.** When the live data stops arriving
-the dashboard keeps the last values it had — the needle stops where it was,
+the dashboard keeps the last values it had — the bars stop where they were,
 the tiles keep their numbers — and the status dot turns amber with `STALE`
 (or `WAIT` before the first sample ever arrives, `NO WIFI` in red when the
 link itself is down). Nothing is blanked and no overlay covers the screen; a
 value that was *never* received stays at `--`, because NaN is the only thing
-that draws a dash. `updateTach` / `updateReadouts` therefore take no `stale`
+that draws a dash. `updateBars` / `updateReadouts` therefore take no `stale`
 flag at all, and the only consumer of it is `updateConn`.
 
 **Deliberate deviations from `dash.html`:**
 
 * Status bar is **30 px** instead of 2.8u = 22 px, so the buttons are a
-  usable touch target. The tach band absorbs the difference.
-* Long-press anywhere on the tach opens settings, because the status-bar
+  usable touch target. The bar band absorbs the difference.
+* Long-press anywhere on the bar band opens settings, because the status-bar
   buttons are small for use in a moving car.
 * Boost / speed / rpm are drawn with the "eased" value (110 ms time
   constant, same as the page) rather than snapping.
@@ -205,6 +205,17 @@ cd /home/adam/OpenHaldex-S3-Dash
 The first build downloads the pioarduino `espressif32@55.3.312` platform
 (the same release the C6 firmware uses) plus the framework — a few minutes,
 once.
+
+**If the platform disappears on the first build**, the installed core is
+reporting itself as a post-release of 6.2.0 (`6.2.0.post1`), which PlatformIO
+turns into the semver *pre-release* `6.2.0-post.1`. The platform declares
+`engines >= 6.2.0`, the pre-release fails that test, and Platform Manager
+deletes the platform — leaving `~/.platformio/platforms` empty and a build log
+that ends with `IncompatiblePlatform`. The core is a post-release, not a
+pre-release, so report it as plain 6.2.0:
+`platformio/__init__.py` → `VERSION = (6, 2, 0)` (this machine has it patched
+in both the global `penv` and the project `.venv`, with the reason in a
+comment).
 
 **PSRAM must be OPI.** The panel driver needs two 800x480x16 bpp frame
 buffers (1.50 MB) reachable by the LCD DMA engine. `platformio.ini` sets
@@ -378,7 +389,7 @@ source is printed at boot, and `p` on the serial console steps the clock down
 
 | Key | Effect |
 |---|---|
-| `1`..`6` | toggle redraw groups: arcs, needle, ticks, digits, readouts, status bar |
+| `1`..`6` | toggle redraw groups: rev bar, boost bar, tick numbers, big numbers, readouts, status bar |
 | `0` / `9` | all on / all off |
 | `p` | step the pixel clock down one notch |
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
@@ -401,9 +412,10 @@ have to be stopped: `E` (stop listening) and then `n` (stop polling). Either
 one alone leaves the dashboard live — which is the point of the fallback, and
 `[stats] source ...` says which one is carrying it.
 
-Geometry (ring radius, tick spacing, tile widths) is all derived in
-`include/theme.h` from the same formulas as `dash.html`, so it is adjusted
-in one place.
+Geometry (bar cell size, tile widths and padding) is derived in
+`include/theme.h`, so it is adjusted in one place. Only the top band is a
+redesign — see `docs/redesign-bars.md`; mock-ups and the tool that draws them
+are in `docs/mockups/` and `tools/mockup_dash.py`.
 
 ---
 
@@ -490,6 +502,22 @@ src/
     config.h/.cpp           NVS-backed settings, validation, revision counter
   ui/
     dash_ui.h/.cpp          the whole dashboard in LVGL
+    fonts/
+      font_rpm_96.c         96 px rev digits, generated (tools/make_fonts.sh)
+      font_num_56.c         56 px boost value, generated
+
+tools/
+  make_fonts.sh             regenerate src/ui/fonts from tools/fonts/*.ttf
+  mockup_dash.py            draw the layout at panel size before coding it
+  serial_capture.py         reset + read the console (read-only)
+  serial_cmd.py             send one console command
+  serial_seq.py             drive a timed sequence of console commands
+  serial_tune.py            mask sweep: render cost per redraw group
+  fonts/                    Montserrat Bold (OFL) + licence
+
+docs/
+  redesign-bars.md          why the ring went and what replaced it
+  mockups/                  the mock-ups the layout was chosen from
 
 .backup/                    factory 4 MB image (gitignored)
 ```
@@ -505,20 +533,24 @@ src/
 | Factory firmware backed up | **done** — 4 MB, sha256 recorded (§5) |
 | Firmware builds clean | **done** — see numbers below |
 | Panel / touch bring-up | **done** — RGB panel, GT911 and the PCA9557 all come up |
-| Link to a live C6 | **done** — `/api/live` at 10 Hz and `/api/dashboard` at 1 Hz, `live 57 ok / 2 fail` over 30 s |
+| Link to a live C6 | **done** — `/api/live` and `/api/dashboard` at 1 Hz, plus the C6's ESP-NOW broadcast at ~10 Hz (§3) |
 | Tearing / jitter fixed | **done** — visually confirmed stable. Two frame buffers + DIRECT mode, push only on `lv_display_flush_is_last()`, flush_ready only after the panel's frame callback, PLL_D2 clock, 24-line bounce buffer, pclk 16 MHz |
-| Live data on screen | **done** — `/api/live` at 10 Hz; mode changes made on the OpenHaldex unit show up on the dash |
+| Live data on screen | **done** — the fast fields come over ESP-NOW at ~10 Hz (§9); mode changes made on the OpenHaldex unit show up on the dash |
 | Stale behaviour | **done** — the data stays on the glass and only the status light changes; proved by diffing frame dumps (§8) |
 | ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate |
 | ESP-NOW drives the dashboard (phase 2) | **done** — `rpm`/`speed`/`throttle`/`boost`/`lock*`/`oil` and the brake, handbrake, coupling, temp-protection and CAN flags come from the packet; coolant and the TC/ASR/AWD lamps stay on HTTP; the HTTP fallback and the both-gone stale path were both staged on the bench (§3) |
+| Bar redesign (ring -> two bars) | **done** — the tach ring was ~34 ms and the needle's dirty patch ~23.5 ms of a 58.8 ms frame; the mask sweep is now flat across every redraw group at the unchanged 16 MHz pixel clock (`docs/redesign-bars.md`) |
 | On-car test | not yet |
 
 Build result:
 
 ```
-RAM:   153 220 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 633 426 / 1 966 080 B (83.1%) <- of the 1.875 MB OTA slot
+RAM:   153 692 / 327 680 B   (46.9%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 619 106 / 1 966 080 B (82.4%) <- of the 1.875 MB OTA slot
 ```
+
+(The bar redesign made flash go *down*: the deleted arc, needle, hub and tick
+code outweighed the two generated 96 px / 56 px fonts.)
 
 ### Memory, exactly
 

@@ -57,6 +57,12 @@
 
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
+/* The two big numbers (src/ui/fonts) are RLE-compressed: without this,
+   lv_font_get_glyph_bitmap() returns NULL for every glyph of a compressed
+   font and the letter drawing code dereferences it. That is a hard fault,
+   not a fallback, which is exactly what it did. */
+#define LV_USE_FONT_COMPRESSED 1
+
 /*====================
    WIDGETS
  *====================*/

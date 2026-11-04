@@ -1,13 +1,17 @@
 // =====================================================================
 // theme.h - colours, fonts and the layout model
 //
-// The palette and the geometry are a direct port of dash.html (the browser
-// reference). dash.html sized everything from one unit:
+// The palette is a direct port of dash.html (the browser reference), and so
+// is the tile band. dash.html sized everything from one unit:
 //
 //     --u = min(viewport_w / 100, viewport_h / 56)
 //
-// At 800x480 that gives u = 8 px. Keeping the same formula means the panel
-// layout is provably the same as the page that was reviewed and approved.
+// At 800x480 that gives u = 8 px, which is where the tile padding comes from.
+//
+// The top band is no longer the ported tach ring: the ring, needle and hub
+// cost ~58 ms a frame on this board and were replaced by two bars, which is
+// a redesign rather than a port (see docs/mockups and the gauge section
+// below).
 // =====================================================================
 #pragma once
 
@@ -33,8 +37,7 @@
 #define COL_ZONE_GREEN lv_color_hex(0x123a22)  // unlit zone tints
 #define COL_ZONE_AMBER lv_color_hex(0x3a2a10)
 #define COL_ZONE_RED lv_color_hex(0x3a1414)
-#define COL_WHITE lv_color_hex(0xf2f5f8)
-#define COL_HUB lv_color_hex(0x20262d)
+#define COL_WHITE lv_color_hex(0xf2f5f8)  // boost bar, big rev digits
 
 // --------------------------------------------------------------- fonts
 // Montserrat sizes enabled in lv_conf.h.
@@ -43,10 +46,18 @@
 #define FONT_BODY (&lv_font_montserrat_16)    // status bar, lock rows
 #define FONT_TEMP (&lv_font_montserrat_22)    // coolant / oil values
 #define FONT_MODE (&lv_font_montserrat_28)    // Haldex mode name
-#define FONT_BIG (&lv_font_montserrat_48)     // speed / boost values
-#define FONT_TACH (&lv_font_montserrat_48)    // rpm digits
-#define FONT_TICK (&lv_font_montserrat_14)    // tach ring numbers
-#define FONT_RPM_LBL (&lv_font_montserrat_18)
+#define FONT_BIG (&lv_font_montserrat_48)     // speed value
+#define FONT_TICK (&lv_font_montserrat_14)    // numbers under the rev bar
+
+// The two big numbers come from Montserrat Bold. LVGL ships Montserrat only
+// up to 48 px, so they are generated from the TTF into src/ui/fonts by
+// tools/make_fonts.sh. Only the glyphs they need are in there (digits, '-',
+// '.'), which is why 96 px costs 43 KB rather than the ~150 KB a full size
+// would. '-' is what draws "--" for a value that has never arrived.
+LV_FONT_DECLARE(lv_font_dash_rpm_96);
+LV_FONT_DECLARE(lv_font_dash_num_56);
+#define FONT_RPM (&lv_font_dash_rpm_96)       // the big rev readout
+#define FONT_NUM (&lv_font_dash_num_56)       // the boost value beside it
 
 // ------------------------------------------------------------- layout
 // All in pixels, evaluated once for the 800x480 panel.
@@ -64,60 +75,55 @@ constexpr int H = LCD_V_RES;
 // 7" panel, so the bar is 30 px instead and the tach band absorbs the
 // difference. Everything below is derived, so nothing else needs editing.
 constexpr int STATUS_H = 30;                          // was 2.8u = 22
-constexpr int CONTENT_H = H - STATUS_H;               // 458
-constexpr int TOP_H = (CONTENT_H * 56) / 100;         // 256
+constexpr int CONTENT_H = H - STATUS_H;               // 450
+constexpr int TOP_H = (CONTENT_H * 56) / 100;         // 252
 constexpr int BOTTOM_Y = TOP_H + 1;                   // 1px divider
-constexpr int BOTTOM_H = CONTENT_H - TOP_H - 1;       // 201
+constexpr int BOTTOM_H = CONTENT_H - TOP_H - 1;       // 197
 
-// #bottom grid-template-columns: 1.05fr 1.05fr 1.15fr 1.25fr
+// #bottom is three tiles now: SPEED | TEMPERATURES | HALDEX. Boost moved to
+// the top of the screen as a bar, so its tile and its column are gone.
 constexpr int COL0_X = 0;
-constexpr int COL0_W = (W * 105) / 450;                                  // 186
+constexpr int COL0_W = (W * 3) / 10;                                     // 240  SPEED
 constexpr int COL1_X = COL0_X + COL0_W;
-constexpr int COL1_W = (W * 105) / 450;                                  // 186
+constexpr int COL1_W = (W * 13) / 40;                                    // 260  TEMPERATURES
 constexpr int COL2_X = COL1_X + COL1_W;
-constexpr int COL2_W = (W * 115) / 450;                                  // 204
-constexpr int COL3_X = COL2_X + COL2_W;
-constexpr int COL3_W = W - COL3_X;                                       // 224
+constexpr int COL2_W = W - COL2_X;                                       // 300  HALDEX
 
 // .tile padding: 0.9u vertical, 1.1u horizontal
 constexpr int TILE_PAD_V = (U * 9) / 10;  // 7
 constexpr int TILE_PAD_H = (U * 11) / 10; // 8
 
-// ------------------------------------------------------------- tach ring
-// Ported verbatim from drawTach() in dash.html:
-//   pad  = max(4, min(cw,ch) * 0.02)
-//   r    = min((cw-2*pad)/2.20, (ch-2*pad)/1.92)
-//   thick= max(8, r * 0.20)
-//   cx   = cw/2,  cy = pad + r * 1.10
-constexpr int TACH_CW = W;
-constexpr int TACH_CH = TOP_H;
-constexpr int TACH_PAD = (TACH_CH * 2) / 100 > 4 ? (TACH_CH * 2) / 100 : 4;  // 5
-constexpr int TACH_FIT_W = ((TACH_CW - 2 * TACH_PAD) * 100) / 220;           // /2.20
-constexpr int TACH_FIT_H = ((TACH_CH - 2 * TACH_PAD) * 100) / 192;           // /1.92
-constexpr int TACH_R = TACH_FIT_W < TACH_FIT_H ? TACH_FIT_W : TACH_FIT_H;    // 127
-constexpr int TACH_THICK = (TACH_R * 20) / 100 > 8 ? (TACH_R * 20) / 100 : 8;  // 25
-constexpr int TACH_CX = TACH_CW / 2;                                         // 400
-constexpr int TACH_CY = TACH_PAD + (TACH_R * 110) / 100;                     // 144
+// ---------------------------------------------------------------- gauge
+// Two bars stacked on the left, the numbers they belong to in a column on
+// the right. The bars replace the old tach ring, needle and 9 ticks: a bar's
+// moving edge is an opaque rectangle, so a change repaints only the cells
+// that crossed the edge instead of a 279 px anti-aliased arc.
+//
+// Each bar is BAR_SEG opaque cells with a BAR_GAP between them. 40 cells over
+// 512 px is 12.8 px per cell, which still reads as a continuous bar at arm's
+// length and keeps the per-frame repaint to about one cell.
+constexpr int BAR_X = 8;
+constexpr int BAR_W = 512;                // 8 .. 520
+constexpr int BAR_SEG = 40;
+constexpr int BAR_GAP = 2;
 
-// The lv_arc object must be (2r + thick) square so that the drawn stroke
-// lands exactly on radius r: LVGL puts the arc centre line at
-// (min(w,h) - arc_width) / 2 from the centre.
-constexpr int ARC_OBJ = 2 * TACH_R + TACH_THICK;  // 279
-constexpr int ARC_X = TACH_CX - ARC_OBJ / 2;
-constexpr int ARC_Y = TACH_CY - ARC_OBJ / 2;
+constexpr int BOOST_BAR_Y = 6;
+constexpr int BOOST_BAR_H = 56;           // the fat one on top
+constexpr int REV_BAR_Y = 70;
+constexpr int REV_BAR_H = 142;            // fatter still, below it
+constexpr int TICK_ROW_Y = 218;           // numbers under the rev bar
+constexpr int TICK_ROW_H = 20;
 
-// 270 degree sweep starting at 135 degrees (7:30 position), clockwise.
-constexpr int ARC_ROTATION_DEG = 135;
-constexpr int ARC_SWEEP_DEG = 270;
-
-// Tick geometry from dash.html:
-//   r1 = r - thick*0.50, r2 = r + thick*0.50, labels at r - thick*1.00
-constexpr int TICK_R_IN = TACH_R - TACH_THICK / 2;
-constexpr int TICK_R_OUT = TACH_R + TACH_THICK / 2;
-constexpr int TICK_R_LABEL = TACH_R - TACH_THICK;
-
-constexpr int NEEDLE_LEN = TACH_R - TACH_THICK / 10;
-constexpr int NEEDLE_TAIL = (TACH_R * 14) / 100;
-constexpr int HUB_R = (TACH_R * 85) / 1000;
+// The value column: BOOST over REVS, each with a caption, the way the
+// approved mock-up has it. Everything in it is right-aligned to VAL_R.
+constexpr int VAL_DIV_X = 511;            // vertical rule between bars/values
+constexpr int VAL_X = 520;
+constexpr int VAL_R = W - 8;              // 792
+constexpr int VAL_W = VAL_R - VAL_X;      // 272
+constexpr int VAL_CAP_Y = 8;              // "BOOST" / "RPM" captions
+constexpr int VAL_BOOST_Y = 22;           // 56 px value
+constexpr int VAL_UNIT_Y = 78;            // "bar" / "psi" / "mbar"
+constexpr int VAL_DIV_Y = 104;            // horizontal rule
+constexpr int VAL_RPM_Y = 132;            // 96 px value
 
 }  // namespace layout

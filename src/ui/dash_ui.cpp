@@ -1,20 +1,28 @@
 // =====================================================================
-// dash_ui.cpp - the LVGL dashboard, a native port of dash.html
+// dash_ui.cpp - the LVGL dashboard
 //
 // Widget map (see theme.h for the numbers):
 //
 //   +--------------------------------------------------------------+
-//   |  tach ring: 3 zone arcs, 9 ticks, needle, hub, rpm digits    |  top 252 px
-//   +----------+----------+-------------+-------------------------+
-//   |  SPEED   |  BOOST   | TEMPERATURES|  HALDEX                 |  bottom 197 px
-//   |  123     |  1.25 bar| cool / oil  |  mode, lock req/act, thr |
-//   +----------+----------+-------------+-------------------------+
-//   | * LIVE  BRAKE HAND TC ASR AWD     peaks   RESET  DAY  SETTINGS| status 30 px
+//   |  BOOST  [###############...................]        1.55     |
+//   |  REVS   [########################.......]           6800     |  top 252 px
+//   |         1   2   3   4   5   6   7   x1000             bar    |
+//   +------------------+-----------------+-------------------------+
+//   |  SPEED           | TEMPERATURES    |  HALDEX                 |  bottom 197 px
+//   |  123 km/h        |  cool / oil     |  mode, lock req/act, thr |
+//   +------------------+-----------------+-------------------------+
+//   | * LIVE  BRAKE HAND TC ASR AWD   peaks   RESET  DAY  SETTINGS | status 30 px
 //   +--------------------------------------------------------------+
 //
-// Reading order matches the page: fast values come from /api/live, slow
-// flags from /api/dashboard, and nothing is drawn for a value the C6
-// reported as null ("--" instead of 0).
+// The top band used to be a tach ring (3 anti-aliased arcs, 9 ticks, a
+// needle and a hub). On this board that cost ~58 ms of a 61 ms frame - it
+// was the entire frame budget - so it was replaced by two bars: a bar's
+// moving edge is an opaque rectangle, and only the cells that crossed the
+// edge are repainted. See docs/redesign-bars.md.
+//
+// Values come from net/datafeed.h, which merges the C6's ESP-NOW broadcast
+// with its HTTP API, and nothing is drawn for a value that has never
+// arrived ("--" instead of 0).
 // =====================================================================
 #include "ui/dash_ui.h"
 
@@ -41,16 +49,21 @@ const char *const kModeNames[6] = {"STOCK", "FWD", "50:50", "60:40", "75:25", "E
 
 // ------------------------------------------------------------- handles
 struct Widgets {
-  lv_obj_t *tach = nullptr;
+  lv_obj_t *top = nullptr;  // the whole top band; long-press opens settings
 
-  lv_obj_t *arcGreen = nullptr, *arcAmber = nullptr, *arcRed = nullptr;
-  lv_obj_t *needle = nullptr, *hub = nullptr;
-  lv_obj_t *rpmDigits = nullptr, *shiftLamp = nullptr;
-  lv_obj_t *tickLine[9] = {};
-  lv_obj_t *tickLabel[9] = {};
+  // The two bars, their cells, and the row of numbers under the rev bar.
+  // A group per bar so the debug mask can hide them one at a time.
+  lv_obj_t *boostGrp = nullptr, *revGrp = nullptr, *ticksGrp = nullptr, *bigGrp = nullptr;
+  lv_obj_t *boostCell[L::BAR_SEG] = {};
+  lv_obj_t *revCell[L::BAR_SEG] = {};
+  lv_obj_t *tickLabel[12] = {};  // one per thousand rpm, minus both ends
+  lv_obj_t *tickUnit = nullptr;  // "x1000", at the right-hand end
+  int tickLabels = 0;
+
+  lv_obj_t *rpmVal = nullptr, *boostVal = nullptr, *boostUnit = nullptr;
+  lv_obj_t *rpmCap = nullptr, *boostCap = nullptr;
 
   lv_obj_t *speedVal = nullptr, *speedPeak = nullptr;
-  lv_obj_t *boostVal = nullptr, *boostUnit = nullptr, *boostBar = nullptr, *boostPeak = nullptr;
   lv_obj_t *coolVal = nullptr, *coolBar = nullptr, *oilVal = nullptr, *oilBar = nullptr;
   lv_obj_t *modeVal = nullptr, *haldexSub = nullptr;
   lv_obj_t *lockReqVal = nullptr, *lockActVal = nullptr, *thrBar = nullptr;
@@ -86,23 +99,28 @@ uint32_t g_staleEvents = 0;
 uint32_t g_maxStaleAgeMs = 0;
 bool dbg(uint16_t bit) { return (g_dbgMask & bit) != 0; }
 
-uint32_t g_tachUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
+uint32_t g_barsUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
 bool g_dbgHideAll = false;
 uint32_t g_lastFlashMs = 0;
 uint32_t g_lastTickMs = 0;
 bool g_settingsOpen = false;
 bool g_stale = true;
 
-// Persistent storage for the needle's two points: LVGL keeps the pointer.
-lv_point_precise_t g_needlePts[2] = {{0, 0}, {0, 0}};
+// Which cells of each bar are currently lit: 1 lit, 0 dark, -1 unknown.
+// -1 is the state after start-up and after the zone colours change, so the
+// first update after that repaints every cell instead of assuming dark.
+int8_t g_revLit[L::BAR_SEG];
+int8_t g_boostLit[L::BAR_SEG];
+
+// Lit/unlit colour per rev cell, from the rpm zones. Fixed until the
+// redline moves, so a cell's colour is decided once per settings change, not
+// once per frame.
+struct CellColour {
+  lv_color_t lit, unlit;
+};
+CellColour g_revCol[L::BAR_SEG];
 
 // ------------------------------------------------------------- helpers
-inline float angFor(float frac) {
-  if (!(frac >= 0.0f)) frac = 0.0f;
-  if (frac > 1.0f) frac = 1.0f;
-  return (L::ARC_ROTATION_DEG + frac * L::ARC_SWEEP_DEG) * kPi / 180.0f;
-}
-
 void setText(lv_obj_t *label, const char *text) {
   const char *cur = lv_label_get_text(label);
   if (!cur || strcmp(cur, text) != 0) lv_label_set_text(label, text);
@@ -281,137 +299,113 @@ void lampState(lv_obj_t *l, bool on, bool red) {
   setTextColor(l, on ? (red ? lv_color_white() : lv_color_black()) : COL_LAMP_TXT_OFF);
 }
 
-// ------------------------------------------------------------ tach ring
-void styleArc(lv_obj_t *arc, lv_color_t dim, lv_color_t lit) {
-  lv_obj_remove_style_all(arc);
-  lv_obj_set_size(arc, L::ARC_OBJ, L::ARC_OBJ);
-  lv_obj_set_pos(arc, L::ARC_X, L::ARC_Y);
-  lv_obj_remove_flag(arc, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-  lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
-
-  lv_obj_set_style_arc_width(arc, L::TACH_THICK, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(arc, dim, LV_PART_MAIN);
-  lv_obj_set_style_arc_rounded(arc, false, LV_PART_MAIN);
-
-  lv_obj_set_style_arc_width(arc, L::TACH_THICK, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_color(arc, lit, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_rounded(arc, false, LV_PART_INDICATOR);
-
-  // No knob: the needle is drawn separately.
-  lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
-  lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
-}
-
-void buildTach(lv_obj_t *parent) {
-  w.tach = opaque(parent, 0, 0, L::W, L::TOP_H, COL_BG);
-
-  // Zones, as fractions of rpmMax. Recomputed whenever the config changes.
+// ---------------------------------------------------------------- gauge
+// Everything that depends on the rpm/boost scale: which zone each rev cell
+// belongs to, and the numbers along the bar. Called once at build time and
+// again whenever the settings change the scale.
+void syncGauge() {
   const cfg::Data &c = cfg::get();
   const float fAmber = c.rpmAmber / c.rpmMax;
   const float fRed = c.rpmRedline / c.rpmMax;
 
-  w.arcGreen = lv_arc_create(w.tach);
-  w.arcAmber = lv_arc_create(w.tach);
-  w.arcRed = lv_arc_create(w.tach);
-  styleArc(w.arcGreen, COL_ZONE_GREEN, COL_GREEN);
-  styleArc(w.arcAmber, COL_ZONE_AMBER, COL_AMBER);
-  styleArc(w.arcRed, COL_ZONE_RED, COL_RED);
-
-  lv_arc_set_rotation(w.arcGreen, L::ARC_ROTATION_DEG);
-  lv_arc_set_rotation(w.arcAmber, L::ARC_ROTATION_DEG);
-  lv_arc_set_rotation(w.arcRed, L::ARC_ROTATION_DEG);
-
-  lv_arc_set_bg_angles(w.arcGreen, 0, (int)(fAmber * L::ARC_SWEEP_DEG));
-  lv_arc_set_bg_angles(w.arcAmber, (int)(fAmber * L::ARC_SWEEP_DEG),
-                       (int)(fRed * L::ARC_SWEEP_DEG));
-  lv_arc_set_bg_angles(w.arcRed, (int)(fRed * L::ARC_SWEEP_DEG), L::ARC_SWEEP_DEG);
-
-  lv_arc_set_angles(w.arcGreen, 0, 0);
-  lv_arc_set_angles(w.arcAmber, 0, 0);
-  lv_arc_set_angles(w.arcRed, 0, 0);
-
-  // Ticks + numbers every 1000 rpm, drawn on the ring like the page does.
-  const int tickCount = (int)(c.rpmMax / 1000.0f) + 1;
-  const int n = tickCount > 9 ? 9 : tickCount;
-  char buf[8];
-  for (int i = 0; i < n; i++) {
-    const float f = (float)i / (float)(n - 1);
-    const float a = angFor(f);
-    const float ca = cosf(a), sa = sinf(a);
-
-    // A line object must be no bigger than the line itself: LVGL
-    // invalidates the object's box, so an 800x252 box here would repaint
-    // half the screen whenever anything near the ring changes.
-    w.tickLine[i] = lv_line_create(w.tach);
-    lv_obj_remove_style_all(w.tickLine[i]);
-    static lv_point_precise_t tickPts[9][2];  // one array per tick, never freed
-    const float x0 = L::TACH_CX + ca * L::TICK_R_IN;
-    const float y0 = L::TACH_CY + sa * L::TICK_R_IN;
-    const float x1 = L::TACH_CX + ca * L::TICK_R_OUT;
-    const float y1 = L::TACH_CY + sa * L::TICK_R_OUT;
-    const int bx = (int)floorf(fminf(x0, x1)) - 2;
-    const int by = (int)floorf(fminf(y0, y1)) - 2;
-    const int bw = (int)ceilf(fabsf(x1 - x0)) + 4;
-    const int bh = (int)ceilf(fabsf(y1 - y0)) + 4;
-    lv_obj_set_pos(w.tickLine[i], bx, by);
-    lv_obj_set_size(w.tickLine[i], bw, bh);
-    tickPts[i][0].x = x0 - bx;
-    tickPts[i][0].y = y0 - by;
-    tickPts[i][1].x = x1 - bx;
-    tickPts[i][1].y = y1 - by;
-    lv_line_set_points(w.tickLine[i], tickPts[i], 2);
-    lv_obj_set_style_line_width(w.tickLine[i], 2, 0);
-    lv_obj_set_style_line_color(w.tickLine[i], f >= 0.85f ? COL_RED : COL_LAMP_EDGE, 0);
-
-    // The number shown is the rpm at this tick, in thousands.
-    snprintf(buf, sizeof(buf), "%d", (int)lroundf((c.rpmMax * f) / 1000.0f));
-    w.tickLabel[i] = boxedLabel(w.tach, (int)(L::TACH_CX + ca * L::TICK_R_LABEL),
-                                (int)(L::TACH_CY + sa * L::TICK_R_LABEL), 42, 18, FONT_TICK,
-                                COL_DIM, buf);
+  for (int i = 0; i < L::BAR_SEG; i++) {
+    // Each cell takes the colour of the zone its centre falls in, so the
+    // amber and red zones are visible as dark tints even before they light.
+    const float f = (i + 0.5f) / (float)L::BAR_SEG;
+    CellColour col{COL_GREEN, COL_ZONE_GREEN};
+    if (f >= fRed) {
+      col = {COL_RED, COL_ZONE_RED};
+    } else if (f >= fAmber) {
+      col = {COL_AMBER, COL_ZONE_AMBER};
+    }
+    g_revCol[i] = col;
+    g_revLit[i] = -1;  // force the next update to paint this cell
   }
 
-  // Needle, then hub on top of its centre. updateTach() moves its box to
-  // the tight bounding box of the two points every frame, so a sweep
-  // repaints ~130x130 px instead of the whole 800x252 tach band.
-  w.needle = lv_line_create(w.tach);
-  lv_obj_remove_style_all(w.needle);
-  lv_obj_set_pos(w.needle, L::TACH_CX, L::TACH_CY - L::NEEDLE_LEN);
-  lv_obj_set_size(w.needle, 3, L::NEEDLE_LEN);
-  g_needlePts[0].x = 0;
-  g_needlePts[0].y = L::NEEDLE_LEN;
-  g_needlePts[1].x = 0;
-  g_needlePts[1].y = 0;
-  lv_line_set_points_mutable(w.needle, g_needlePts, 2);
-  lv_obj_set_style_line_width(w.needle, 3, 0);
-  lv_obj_set_style_line_color(w.needle, COL_WHITE, 0);
-  lv_obj_set_style_line_rounded(w.needle, true, 0);
+  // One number per 1000 rpm. The left end (0) has no number and the top of
+  // the scale is where the unit tag sits, so the count is perK - 1.
+  const int perK = (int)lroundf(c.rpmMax / 1000.0f);
+  int n = perK - 1;
+  if (n < 1) n = 1;
+  if (n > (int)(sizeof(w.tickLabel) / sizeof(w.tickLabel[0]))) {
+    n = (int)(sizeof(w.tickLabel) / sizeof(w.tickLabel[0]));
+  }
+  const int labelW = 40;
+  char buf[8];
+  for (int i = 0; i < n; i++) {
+    snprintf(buf, sizeof(buf), "%d", i + 1);  // thousands
+    setText(w.tickLabel[i], buf);
+    const float f = (float)((i + 1) * 1000) / c.rpmMax;
+    lv_obj_set_x(w.tickLabel[i], (int)lroundf(f * L::BAR_W) - labelW / 2);
+    lv_obj_remove_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+  }
+  for (int i = n; i < (int)(sizeof(w.tickLabel) / sizeof(w.tickLabel[0])); i++) {
+    lv_obj_add_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+  }
+  w.tickLabels = n;
 
-  w.hub = opaque(w.tach, L::TACH_CX - L::HUB_R, L::TACH_CY - L::HUB_R, 2 * L::HUB_R,
-                 2 * L::HUB_R, COL_HUB);
-  lv_obj_set_style_radius(w.hub, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_border_width(w.hub, 2, 0);
-  lv_obj_set_style_border_color(w.hub, COL_LAMP_EDGE, 0);
+  // "x1000" only means something if the scale lands on whole thousands.
+  if (fmodf(c.rpmMax, 1000.0f) == 0.0f) {
+    lv_obj_remove_flag(w.tickUnit, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(w.tickUnit, LV_OBJ_FLAG_HIDDEN);
+  }
+}
 
-  // The box is what gets repainted, so keep it just wider than "8000".
-  w.rpmDigits = boxedLabel(w.tach, L::TACH_CX, L::TACH_CY - (int)(L::TACH_R * 0.30f), 210, 60,
-                           FONT_TACH, COL_FG, "--");
-  boxedLabel(w.tach, L::TACH_CX, L::TACH_CY - (int)(L::TACH_R * 0.02f), 80, 24, FONT_RPM_LBL,
-             COL_DIM, "RPM");
+// The two bars: 40 opaque cells each, painted once at build and then only
+// ever recoloured where the fill edge has moved. Nothing is resized, moved
+// or re-laid-out, which is what keeps a frame cheap.
+void buildBars(lv_obj_t *parent) {
+  w.top = opaque(parent, 0, 0, L::W, L::TOP_H, COL_BG);
 
-  // Shift lamp, top-right (as dash.html places it).
-  w.shiftLamp = label(w.tach, FONT_BODY, lv_color_hex(0x3a1414), "SHIFT");
-  lv_obj_set_size(w.shiftLamp, 64, 24);
-  lv_obj_set_pos(w.shiftLamp, L::W - 64 - 10, 8);
-  lv_obj_set_style_text_align(w.shiftLamp, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_pad_all(w.shiftLamp, 3, 0);
-  lv_obj_set_style_radius(w.shiftLamp, 3, 0);
-  lv_obj_set_style_bg_color(w.shiftLamp, lv_color_hex(0x2a0f0f), 0);
-  lv_obj_set_style_bg_opa(w.shiftLamp, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(w.shiftLamp, 1, 0);
-  lv_obj_set_style_border_color(w.shiftLamp, lv_color_hex(0x481a1a), 0);
+  // One group per bar so the debug mask can switch each one off.
+  w.boostGrp = plain(w.top, L::BAR_X, L::BOOST_BAR_Y, L::BAR_W, L::BOOST_BAR_H);
+  w.revGrp = plain(w.top, L::BAR_X, L::REV_BAR_Y, L::BAR_W, L::REV_BAR_H);
+  w.ticksGrp = plain(w.top, L::BAR_X, L::TICK_ROW_Y, L::BAR_W, L::TICK_ROW_H);
+  w.bigGrp = plain(w.top, L::VAL_X, 0, L::VAL_W, L::TOP_H);
+
+  for (int i = 0; i < L::BAR_SEG; i++) {
+    const int x0 = (i * L::BAR_W) / L::BAR_SEG;
+    const int x1 = ((i + 1) * L::BAR_W) / L::BAR_SEG - L::BAR_GAP;
+    w.boostCell[i] = opaque(w.boostGrp, x0, 0, x1 - x0, L::BOOST_BAR_H, COL_TRACK);
+    w.revCell[i] = opaque(w.revGrp, x0, 0, x1 - x0, L::REV_BAR_H, COL_ZONE_GREEN);
+    g_boostLit[i] = -1;
+  }
+
+  // Numbers along the rev bar, plus the unit tag at its right-hand end.
+  for (int i = 0; i < (int)(sizeof(w.tickLabel) / sizeof(w.tickLabel[0])); i++) {
+    w.tickLabel[i] = fixedLabel(w.ticksGrp, 0, 0, 40, L::TICK_ROW_H, FONT_TICK, COL_DIM, "");
+    lv_obj_set_style_text_align(w.tickLabel[i], LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+  }
+  w.tickUnit =
+      fixedLabel(w.ticksGrp, L::BAR_W - 48, 0, 48, L::TICK_ROW_H, FONT_CAP, COL_DIM, "x1000");
+  lv_obj_set_style_text_align(w.tickUnit, LV_TEXT_ALIGN_RIGHT, 0);
+
+  // Rule between the bars and the numbers they belong to.
+  opaque(w.top, L::VAL_DIV_X, 0, 1, L::TOP_H, COL_LINE);
+
+  // ---- right column: BOOST over REVS ------------------------------
+  w.boostCap = fixedLabel(w.bigGrp, 0, L::VAL_CAP_Y, L::VAL_W, 18, FONT_CAP, COL_DIM, "BOOST");
+  w.boostVal = fixedLabel(w.bigGrp, 0, L::VAL_BOOST_Y, L::VAL_W, 70, FONT_NUM, COL_FG, "--");
+  w.boostUnit = fixedLabel(w.bigGrp, 0, L::VAL_UNIT_Y, L::VAL_W, 20, FONT_SMALL, COL_DIM, "bar");
+  opaque(w.bigGrp, 0, L::VAL_DIV_Y, L::VAL_W, 1, COL_LINE);
+  w.rpmCap = fixedLabel(w.bigGrp, 0, L::VAL_RPM_Y - 16, L::VAL_W, 18, FONT_CAP, COL_DIM, "RPM");
+  w.rpmVal = fixedLabel(w.bigGrp, 0, L::VAL_RPM_Y, L::VAL_W, 90, FONT_RPM, COL_FG, "--");
+
+  // Right-aligned to the panel's right margin, like the mock-up.
+  lv_obj_t *right[3] = {w.boostVal, w.boostUnit, w.rpmVal};
+  for (int i = 0; i < 3; i++) {
+    lv_obj_set_style_text_align(right[i], LV_TEXT_ALIGN_RIGHT, 0);
+  }
+
+  syncGauge();
 }
 
 // --------------------------------------------------------------- tiles
+// Three tiles now. The BOOST tile is gone: boost is the bar at the top of
+// the screen plus the value beside it, and showing the same number in two
+// places was duplicating it.
 void buildTiles(lv_obj_t *parent) {
   const int y = L::BOTTOM_Y;
   const int h = L::BOTTOM_H;
@@ -432,77 +426,58 @@ void buildTiles(lv_obj_t *parent) {
   w.speedPeak = fixedLabel(t0, L::TILE_PAD_H, h - 24, L::COL0_W - 2 * L::TILE_PAD_H, 18,
                            FONT_SMALL, COL_DIM, "peak --");
 
-  // ---- BOOST ------------------------------------------------------
+  // ---- TEMPERATURES -----------------------------------------------
   lv_obj_t *t1 = opaque(parent, L::COL1_X, y, L::COL1_W, h, COL_BG);
   lv_obj_set_style_border_side(t1, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t1, 1, 0);
   lv_obj_set_style_border_color(t1, COL_LINE, 0);
 
-  cap = label(t1, FONT_CAP, COL_DIM, "BOOST");
+  cap = label(t1, FONT_CAP, COL_DIM, "TEMPERATURES");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.boostVal = fixedLabel(t1, L::TILE_PAD_H - 2, 44, 140, 58, FONT_BIG, COL_FG, "--");
-
-  w.boostUnit = fixedLabel(t1, L::TILE_PAD_H + 4, h - 44, 60, 18, FONT_CAP, COL_DIM, "bar");
-
-  w.boostBar = bar(t1, L::TILE_PAD_H, h - 62, L::COL1_W - 2 * L::TILE_PAD_H, 9, COL_GREEN, 0,
-                   100);
-  w.boostPeak = fixedLabel(t1, L::TILE_PAD_H, h - 24, L::COL1_W - 2 * L::TILE_PAD_H, 18,
-                           FONT_SMALL, COL_DIM, "peak --");
-
-  // ---- TEMPERATURES -----------------------------------------------
-  lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
-  lv_obj_set_style_border_side(t2, LV_BORDER_SIDE_RIGHT, 0);
-  lv_obj_set_style_border_width(t2, 1, 0);
-  lv_obj_set_style_border_color(t2, COL_LINE, 0);
-
-  cap = label(t2, FONT_CAP, COL_DIM, "TEMPERATURES");
-  lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
-
-  const int tw = L::COL2_W - 2 * L::TILE_PAD_H;
-  lv_obj_t *cl = label(t2, FONT_CAP, COL_DIM, "COOLANT");
+  const int tw = L::COL1_W - 2 * L::TILE_PAD_H;
+  lv_obj_t *cl = label(t1, FONT_CAP, COL_DIM, "COOLANT");
   lv_obj_set_pos(cl, L::TILE_PAD_H, 40);
-  w.coolVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 30, 92, 30, FONT_TEMP, COL_FG, "--");
+  w.coolVal = fixedLabel(t1, L::TILE_PAD_H + tw - 92, 30, 92, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.coolVal, LV_TEXT_ALIGN_RIGHT, 0);
-  w.coolBar = bar(t2, L::TILE_PAD_H, 74, tw, 10, COL_GREEN, 0, 100);
+  w.coolBar = bar(t1, L::TILE_PAD_H, 74, tw, 10, COL_GREEN, 0, 100);
 
-  lv_obj_t *ol = label(t2, FONT_CAP, COL_DIM, "OIL");
+  lv_obj_t *ol = label(t1, FONT_CAP, COL_DIM, "OIL");
   lv_obj_set_pos(ol, L::TILE_PAD_H, 104);
-  w.oilVal = fixedLabel(t2, L::TILE_PAD_H + tw - 92, 94, 92, 30, FONT_TEMP, COL_FG, "--");
+  w.oilVal = fixedLabel(t1, L::TILE_PAD_H + tw - 92, 94, 92, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.oilVal, LV_TEXT_ALIGN_RIGHT, 0);
-  w.oilBar = bar(t2, L::TILE_PAD_H, 138, tw, 10, COL_GREEN, 0, 100);
+  w.oilBar = bar(t1, L::TILE_PAD_H, 138, tw, 10, COL_GREEN, 0, 100);
 
   // ---- HALDEX -----------------------------------------------------
-  lv_obj_t *t3 = opaque(parent, L::COL3_X, y, L::COL3_W, h, COL_BG);
+  lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
 
-  cap = label(t3, FONT_CAP, COL_DIM, "HALDEX");
+  cap = label(t2, FONT_CAP, COL_DIM, "HALDEX");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
 
-  w.modeVal = fixedLabel(t3, L::TILE_PAD_H, 36, L::COL3_W - 2 * L::TILE_PAD_H, 36, FONT_MODE,
+  w.modeVal = fixedLabel(t2, L::TILE_PAD_H, 36, L::COL2_W - 2 * L::TILE_PAD_H, 36, FONT_MODE,
                          COL_FG, "--");
 
-  w.haldexSub = fixedLabel(t3, L::TILE_PAD_H, 70, L::COL3_W - 2 * L::TILE_PAD_H, 20, FONT_SMALL,
+  w.haldexSub = fixedLabel(t2, L::TILE_PAD_H, 70, L::COL2_W - 2 * L::TILE_PAD_H, 20, FONT_SMALL,
                            COL_DIM, "coupling --");
 
-  lv_obj_t *lr = label(t3, FONT_CAP, COL_DIM, "LOCK REQ");
+  lv_obj_t *lr = label(t2, FONT_CAP, COL_DIM, "LOCK REQ");
   lv_obj_set_pos(lr, L::TILE_PAD_H, 94);
-  w.lockReqVal = fixedLabel(t3, L::COL3_W - 110, 86, 100, 30, FONT_TEMP, COL_FG, "--");
+  w.lockReqVal = fixedLabel(t2, L::COL2_W - 110, 86, 100, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.lockReqVal, LV_TEXT_ALIGN_RIGHT, 0);
 
-  lv_obj_t *la = label(t3, FONT_CAP, COL_DIM, "LOCK ACT");
+  lv_obj_t *la = label(t2, FONT_CAP, COL_DIM, "LOCK ACT");
   lv_obj_set_pos(la, L::TILE_PAD_H, 126);
-  w.lockActVal = fixedLabel(t3, L::COL3_W - 110, 118, 100, 30, FONT_TEMP, COL_FG, "--");
+  w.lockActVal = fixedLabel(t2, L::COL2_W - 110, 118, 100, 30, FONT_TEMP, COL_FG, "--");
   lv_obj_set_style_text_align(w.lockActVal, LV_TEXT_ALIGN_RIGHT, 0);
 
-  lv_obj_t *thr = label(t3, FONT_CAP, COL_FG, "THR");
+  lv_obj_t *thr = label(t2, FONT_CAP, COL_FG, "THR");
   lv_obj_set_pos(thr, L::TILE_PAD_H + 4, 160);
-  w.thrBar = bar(t3, L::TILE_PAD_H, 176, L::COL3_W - 2 * L::TILE_PAD_H, 12, COL_GREEN, 0, 100);
+  w.thrBar = bar(t2, L::TILE_PAD_H, 176, L::COL2_W - 2 * L::TILE_PAD_H, 12, COL_GREEN, 0, 100);
 }
 
 // ---------------------------------------------------------- status bar
 void onResetPeaks(lv_event_t *) {
   g_peaks.rpm = g_peaks.speed = g_peaks.boost = NAN;
-  setText(w.peakTxt, "PEAKS RESET");
 }
 
 void onToggleDay(lv_event_t *) {
@@ -614,16 +589,6 @@ void refreshSteppers() {
   }
 }
 
-void syncTachZones() {
-  const cfg::Data &c = cfg::get();
-  const float fAmber = c.rpmAmber / c.rpmMax;
-  const float fRed = c.rpmRedline / c.rpmMax;
-  const int amberDeg = (int)(fAmber * L::ARC_SWEEP_DEG);
-  const int redDeg = (int)(fRed * L::ARC_SWEEP_DEG);
-  lv_arc_set_bg_angles(w.arcGreen, 0, amberDeg);
-  lv_arc_set_bg_angles(w.arcAmber, amberDeg, redDeg);
-  lv_arc_set_bg_angles(w.arcRed, redDeg, L::ARC_SWEEP_DEG);
-}
 
 void taEvent(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
@@ -681,7 +646,7 @@ void onCfgSave(lv_event_t *) {
   strncpy(g_edit.host, lv_textarea_get_text(g_taHost), sizeof(g_edit.host) - 1);
   cfg::apply(g_edit);
   crowpanel::setBacklight((uint8_t)lroundf(cfg::get().brightness));
-  syncTachZones();
+  syncGauge();  // the zones and the numbers move with the scale
   showSettings(false);
 }
 
@@ -698,7 +663,7 @@ void onCfgDefaults(lv_event_t *) {
   lv_textarea_set_text(g_taPass, g_edit.pass);
   lv_textarea_set_text(g_taHost, g_edit.host);
   refreshSteppers();
-  syncTachZones();
+  syncGauge();  // the zones and the numbers move with the scale
 }
 
 void onCfgClose(lv_event_t *) { showSettings(false); }
@@ -837,70 +802,69 @@ const char *boostUnitText() {
   }
 }
 
-void updateTach(const cfg::Data &c, float rpm) {
-  if (!dbg(1) && !dbg(2) && !dbg(8)) return;
-  // A missing or never-received rpm shows as "--", but old rpm keeps its
-  // needle: going stale is signalled by the status light, not by wiping the
-  // screen. So the only thing that can blank the gauge is NaN.
-  const bool have = !isnan(rpm);
-  const float frac = have ? (rpm / c.rpmMax) : 0.0f;
-  const float fAmber = c.rpmAmber / c.rpmMax;
-  const float fRed = c.rpmRedline / c.rpmMax;
-
-  const int litDeg = (int)(frac * L::ARC_SWEEP_DEG);
-  const int amberDeg = (int)(fAmber * L::ARC_SWEEP_DEG);
-  const int redDeg = (int)(fRed * L::ARC_SWEEP_DEG);
-
-  // Each zone shows only the part of the sweep it owns.
+// The bars, at the full render rate: the eye tracks the rev bar the way it
+// used to track the needle, and the boost bar fills as the throttle goes on.
+//
+// A cell is only touched when its state actually changes, so a frame that
+// moves the fill edge by one cell repaints exactly one 12x142 px rectangle
+// instead of an arc. setBgColor() is the same-value guard used everywhere
+// else, so even the state comparison is belt and braces.
+void updateBars(const cfg::Data &c, float rpm, float boost) {
   if (dbg(1)) {
-    lv_arc_set_angles(w.arcGreen, 0, litDeg < amberDeg ? litDeg : amberDeg);
-    lv_arc_set_angles(w.arcAmber, amberDeg,
-                      litDeg > amberDeg ? (litDeg < redDeg ? litDeg : redDeg) : amberDeg);
-    lv_arc_set_angles(w.arcRed, redDeg, litDeg > redDeg ? litDeg : redDeg);
+    const float frac = isnan(rpm) ? 0.0f : (rpm / c.rpmMax);
+    int lit = (int)lroundf(frac * L::BAR_SEG);
+    if (lit < 0) lit = 0;
+    if (lit > L::BAR_SEG) lit = L::BAR_SEG;
+    for (int i = 0; i < L::BAR_SEG; i++) {
+      const int8_t want = (i < lit) ? 1 : 0;
+      if (g_revLit[i] != want) {
+        g_revLit[i] = want;
+        setBgColor(w.revCell[i], want ? g_revCol[i].lit : g_revCol[i].unlit, 0);
+      }
+    }
   }
 
-  // Needle. The line lives in a box that is moved onto the tight bounding
-  // box of its two points, so only the pixels the needle actually covers
-  // (plus its previous position) are repainted.
   if (dbg(2)) {
-    const float a = angFor(have ? frac : 0.0f);
-    const float ax = L::TACH_CX - cosf(a) * L::NEEDLE_TAIL;
-    const float ay = L::TACH_CY - sinf(a) * L::NEEDLE_TAIL;
-    const float bx = L::TACH_CX + cosf(a) * L::NEEDLE_LEN;
-    const float by = L::TACH_CY + sinf(a) * L::NEEDLE_LEN;
-    const int half = 3;  // half the stroke width, plus a rounding margin
-    const int ox = (int)floorf(fminf(ax, bx)) - half;
-    const int oy = (int)floorf(fminf(ay, by)) - half;
-    const int ow = (int)ceilf(fabsf(bx - ax)) + 2 * half;
-    const int oh = (int)ceilf(fabsf(by - ay)) + 2 * half;
-
-    if (lv_obj_get_x(w.needle) != ox || lv_obj_get_y(w.needle) != oy) {
-      lv_obj_set_pos(w.needle, ox, oy);
+    // The bar itself is one colour; the number beside it carries the warning
+    // colour, so a single-colour bar does not lose the overboost cue.
+    const float frac = isnan(boost) ? 0.0f : (boost / c.boostMax);
+    int lit = (int)lroundf(frac * L::BAR_SEG);
+    if (lit < 0) lit = 0;
+    if (lit > L::BAR_SEG) lit = L::BAR_SEG;
+    for (int i = 0; i < L::BAR_SEG; i++) {
+      const int8_t want = (i < lit) ? 1 : 0;
+      if (g_boostLit[i] != want) {
+        g_boostLit[i] = want;
+        setBgColor(w.boostCell[i], want ? COL_WHITE : COL_TRACK, 0);
+      }
     }
-    if (lv_obj_get_width(w.needle) != ow || lv_obj_get_height(w.needle) != oh) {
-      lv_obj_set_size(w.needle, ow, oh);
-    }
-    g_needlePts[0].x = ax - ox;
-    g_needlePts[0].y = ay - oy;
-    g_needlePts[1].x = bx - ox;
-    g_needlePts[1].y = by - oy;
-    lv_obj_invalidate(w.needle);
   }
+}
 
-  // Digits + shift lamp.
-  const bool flash = have && (rpm >= c.rpmShift) && g_flashOn;
-  char buf[16];
+// The two big numbers and the boost unit. Both labels are only repainted
+// when their text or colour changes, so this costs nothing on the frames
+// where the value has not moved.
+void updateGaugeText(const cfg::Data &c, float rpm, float boost) {
+  if (!dbg(8)) return;
+
+  // A missing rpm shows as "--"; a stale one keeps its last value, because
+  // going stale is the status light's job.
+  char buf[24];
+  const bool have = !isnan(rpm);
   if (have) {
     snprintf(buf, sizeof(buf), "%d", (int)lroundf(rpm));
   } else {
     snprintf(buf, sizeof(buf), "--");
   }
-  if (dbg(8)) {
-    setSuffix(w.rpmDigits, buf, flash ? COL_RED : COL_FG);
-    setBgColor(w.shiftLamp, flash ? COL_RED : lv_color_hex(0x2a0f0f), 0);
-    setBorderColor(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x481a1a));
-    setTextColor(w.shiftLamp, flash ? lv_color_white() : lv_color_hex(0x3a1414));
-  }
+  // Shift cue: the rev readout flashes red. The old corner SHIFT box is
+  // gone - the value column holds the numbers now - and a 96 px number
+  // flashing is a bigger cue than a 64 px box was.
+  const bool flash = have && (rpm >= c.rpmShift) && g_flashOn;
+  setSuffix(w.rpmVal, buf, flash ? COL_RED : COL_FG);
+
+  fmtBoost(buf, sizeof(buf), boost);
+  setSuffix(w.boostVal, buf, colFor(boost, c.boostWarn, c.boostCrit));
+  setText(w.boostUnit, boostUnitText());
 }
 
 void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telemetry::Dash &d) {
@@ -911,7 +875,20 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
   // is what NaN means.
   const Values v = g_shown;
   char buf[32];
-  char b2[32];
+
+  // The two peaks that have no tile of their own. Speed's peak is in the
+  // SPEED tile, where it has always been.
+  {
+    char rp[16] = "--", bp[16] = "--";
+    if (!isnan(g_peaks.rpm)) snprintf(rp, sizeof(rp), "%d", (int)lroundf(g_peaks.rpm));
+    if (!isnan(g_peaks.boost)) {
+      char b[16];
+      fmtBoost(b, sizeof(b), g_peaks.boost);
+      snprintf(bp, sizeof(bp), "%s %s", b, boostUnitText());
+    }
+    snprintf(buf, sizeof(buf), "rpm %s   boost %s", rp, bp);
+    setText(w.peakTxt, buf);
+  }
 
   // ---- speed
   if (isnan(v.speed)) {
@@ -925,29 +902,6 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
   } else {
     snprintf(buf, sizeof(buf), "peak %d", (int)lroundf(g_peaks.speed));
     setText(w.speedPeak, buf);
-  }
-
-  // ---- boost
-  fmtBoost(buf, sizeof(buf), v.boost);
-  const lv_color_t bcol = colFor(v.boost, c.boostWarn, c.boostCrit);
-  setSuffix(w.boostVal, buf, bcol);
-  setText(w.boostUnit, boostUnitText());
-  {
-    int pct = 0;
-    if (!isnan(v.boost)) {
-      pct = (int)((v.boost / c.boostMax) * 100.0f);
-      if (pct < 0) pct = 0;
-      if (pct > 100) pct = 100;
-    }
-    setBar(w.boostBar, pct);
-    setBgColor(w.boostBar, bcol, LV_PART_INDICATOR);
-  }
-  if (isnan(g_peaks.boost)) {
-    setText(w.boostPeak, "peak --");
-  } else {
-    fmtBoost(b2, sizeof(b2), g_peaks.boost);
-    snprintf(buf, sizeof(buf), "peak %s %s", b2, boostUnitText());
-    setText(w.boostPeak, buf);
   }
 
   // ---- temperatures
@@ -1064,14 +1018,15 @@ void begin() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  buildTach(scr);
+  buildBars(scr);
   buildTiles(scr);
   buildStatusBar(scr);
 
-  // Long-press anywhere on the tach opens settings: the status-bar buttons
-  // are only 24 px tall, which is a small target in a moving car.
-  lv_obj_add_flag(w.tach, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(w.tach, onLongPress, LV_EVENT_LONG_PRESSED, nullptr);
+  // Long-press the top band opens settings, as the tach ring used to: it is
+  // the whole top half of the screen, which beats the 24 px status-bar
+  // buttons as a target in a moving car. The rev bar is inside it.
+  lv_obj_add_flag(w.top, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(w.top, onLongPress, LV_EVENT_LONG_PRESSED, nullptr);
 
   g_edit = cfg::get();
   buildSettings();
@@ -1084,19 +1039,26 @@ void begin() {
 }
 
 void applyDebugMask() {
-  const bool ticksVisible = dbg(4);
-  for (int i = 0; i < 9; i++) {
-    if (!w.tickLine[i]) continue;
-    if (ticksVisible) {
-      lv_obj_remove_flag(w.tickLine[i], LV_OBJ_FLAG_HIDDEN);
-      lv_obj_remove_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+  // The bars are groups, so a group is one hide/show rather than 40 of them.
+  struct Group {
+    lv_obj_t *obj;
+    uint16_t bit;
+  };
+  const Group groups[4] = {{w.revGrp, 1}, {w.boostGrp, 2}, {w.ticksGrp, 4}, {w.bigGrp, 8}};
+  for (const Group &g : groups) {
+    if (!g.obj) continue;
+    if (dbg(g.bit)) {
+      lv_obj_remove_flag(g.obj, LV_OBJ_FLAG_HIDDEN);
     } else {
-      lv_obj_add_flag(w.tickLine[i], LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(w.tickLabel[i], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(g.obj, LV_OBJ_FLAG_HIDDEN);
     }
   }
-  if (g_dbgHideAll && w.tach) lv_obj_add_flag(w.tach, LV_OBJ_FLAG_HIDDEN);
-  if (!g_dbgHideAll && w.tach) lv_obj_remove_flag(w.tach, LV_OBJ_FLAG_HIDDEN);
+  if (!w.top) return;
+  if (g_dbgHideAll) {
+    lv_obj_add_flag(w.top, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_remove_flag(w.top, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void tick() {
@@ -1167,11 +1129,13 @@ void tick() {
   }
 
   uint32_t t0 = micros();
-  updateTach(c, g_shown.rpm);
+  // The bars and the big numbers run at the full rate: the rev bar's edge is
+  // what the eye tracks now that the needle is gone.
+  updateBars(c, g_shown.rpm, g_shown.boost);
+  updateGaugeText(c, g_shown.rpm, g_shown.boost);
   uint32_t t1 = micros();
   // The tiles carry values that only arrive at 10 Hz and are already eased,
-  // so repainting them 30 times a second buys nothing. The tach above stays
-  // at the full rate because the needle is what the eye tracks.
+  // so repainting them 30 times a second buys nothing.
   static uint32_t lastReadouts = 0;
   if (dbg(16) && (uint32_t)(now - lastReadouts) >= 100) {
     lastReadouts = now;
@@ -1181,7 +1145,7 @@ void tick() {
   if (dbg(32)) updateConn(stale);
   uint32_t t3 = micros();
 
-  g_tachUs += t1 - t0;
+  g_barsUs += t1 - t0;
   g_readoutsUs += t2 - t1;
   g_connUs += t3 - t2;
   g_calls++;
@@ -1202,8 +1166,8 @@ void setDebugMask(uint16_t mask) {
 uint16_t debugMask() { return g_dbgMask; }
 
 Timings takeTimings() {
-  Timings t{g_tachUs, g_readoutsUs, g_connUs, g_calls};
-  g_tachUs = g_readoutsUs = g_connUs = g_calls = 0;
+  Timings t{g_barsUs, g_readoutsUs, g_connUs, g_calls};
+  g_barsUs = g_readoutsUs = g_connUs = g_calls = 0;
   return t;
 }
 

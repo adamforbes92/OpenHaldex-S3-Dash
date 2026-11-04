@@ -26,10 +26,11 @@ void showSettings(bool visible);
 bool settingsOpen();
 
 /// Bring-up aid: bit mask selecting which redraw groups stay enabled.
-/// 1 = zone arcs, 2 = needle, 4 = ticks+numbers, 8 = rpm digits + shift
-/// lamp, 16 = tile readouts, 32 = status bar. Clearing a bit stops that
-/// group from invalidating anything, which is how the render cost of each
-/// one is measured on real hardware. 0xFFFF (the default) draws everything.
+/// 1 = rev bar, 2 = boost bar, 4 = numbers under the rev bar, 8 = the two
+/// big numbers, 16 = tile readouts, 32 = status bar. Clearing a bit stops
+/// that group from invalidating anything, which is how the render cost of
+/// each one is measured on real hardware. 0xFFFF (the default) draws
+/// everything.
 /// Number of times the live data has gone stale, and the oldest live data
 /// seen while it was stale (ms). Bench instrument for the link dropping.
 uint32_t staleEvents();
@@ -40,7 +41,7 @@ uint16_t debugMask();
 
 /// Microseconds spent in each phase of tick() since the last call.
 struct Timings {
-  uint32_t tachUs, readoutsUs, connUs;
+  uint32_t barsUs, readoutsUs, connUs;
   uint32_t calls;
 };
 Timings takeTimings();
