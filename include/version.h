@@ -8,7 +8,7 @@
 // =====================================================================
 #pragma once
 
-#define OHX_DASH_VERSION "0.3.0"  // 2A: raw page, lamp sources, capability model
+#define OHX_DASH_VERSION "0.4.1"  // 2B: over-the-air update page, self-revert trial
 
 // Date and time the image was built, which is how two builds of the same
 // version are told apart on the bench.
