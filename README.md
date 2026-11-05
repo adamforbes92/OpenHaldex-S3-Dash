@@ -4,6 +4,17 @@ Native dashboard firmware for a **7" ESP32-S3 panel** that displays the
 OpenHaldex-C6 race-car dashboard. It replaces the browser client
 (`dash.html` hosted on the C6) with firmware running on the display itself.
 
+> ### ⚠️ 100% AI-generated project
+>
+> Every line of this repository — firmware, build scripts, mock-ups and
+> documentation — was written by **goose**, an open-source AI coding agent.
+> Nothing here was typed by hand. The human role was direction, design
+> approval, hardware bring-up and testing in the car.
+>
+> Treat it accordingly: it was built against one specific board (a CrowPanel
+> 7.0" ESP32-S3), it is not security-audited, and the API it consumes is a
+> hobby project's own. Read the code before you flash it.
+
 **The OpenHaldex-C6 firmware is not modified.** This project is purely a
 consumer of the existing, released HTTP API, so the C6 can keep taking
 upstream updates.
