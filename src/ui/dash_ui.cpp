@@ -983,8 +983,17 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
 
   // ---- lamps. Last known state is held, like the readouts above: the amber
   // status light is what tells the driver the data is no longer fresh.
-  lampState(w.lampBrake, d.brakeIn, false);
-  lampState(w.lampHand, d.handbrakeIn, false);
+  // ---- lamps. Two independent things report the pedals on this platform:
+  // the C6's own wired inputs (brakeIn / handbrakeIn) and the chassis CAN
+  // (brakeFromCAN / handbrakeFromCAN, decoded from Bremse_1 and Kombi_1).
+  // Reading only the wired pair is why both lamps sat dark on a car where the
+  // CAN brake bit works and the handbrake bit has read 1 while parked. The
+  // lamp lights when either source says the pedal is down; the raw page shows
+  // the two side by side, so a dead input can be told from a live one.
+  const bool brakeOn = d.brakeIn || d.brakeFromCAN == 1;
+  const bool handOn = d.handbrakeIn || d.handbrakeFromCAN == 1;
+  lampState(w.lampBrake, brakeOn, false);
+  lampState(w.lampHand, handOn, false);
   lampState(w.lampTc, d.tcOn, false);
   lampState(w.lampAsr, d.asrOn, false);
   lampState(w.lampAwd, d.awdWarning, true);
