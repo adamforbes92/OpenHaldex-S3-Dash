@@ -22,3 +22,6 @@ compile_commands.json
 
 # frame dumps / analysis stills derived from bench videos
 .shots/
+
+# --- pioarduino lib-builder scaffolding
+.dummy/

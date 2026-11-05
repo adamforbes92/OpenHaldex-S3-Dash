@@ -16,9 +16,26 @@ controller already publishes, so it can keep taking upstream updates.
 > Nothing here was typed by hand. The human role was direction, design
 > approval, hardware bring-up and testing in the car.
 >
+> The models behind it: **`deepseek-v4.1-flash`** did the heavy lifting, with
+> **`gpt-oss-20b`** running under **local inference** on the simpler tasks.
+> `goose` orchestrates them and does the work on the wire.
+>
 > Treat it accordingly: it was built against one specific board (a CrowPanel
 > 7.0" ESP32-S3), it is not security-audited, and the API it consumes is a
 > hobby project's own. Read the code before you flash it.
+
+---
+
+## Contents
+
+| | | |
+|---|---|---|
+| [Credits](#credits) | [6. Configuration](#6-configuration) | [11. What this device cannot show](#11-what-this-device-cannot-show) |
+| [1. What it shows](#1-what-it-shows) | [7. Display tuning](#7-display-tuning) | [12. Repository layout](#12-repository-layout) |
+| [2. Hardware](#2-hardware) | [8. Serial console](#8-serial-console) | [13. Status](#13-status) |
+| [3. Data flow](#3-data-flow) | [9. What the car can fill](#9-what-the-car-can-fill) | [Licence](#licence) |
+| [4. Build](#4-build) | [10. ESP-NOW](#10-esp-now) | |
+| [5. Before you flash: back up the board](#5-before-you-flash-back-up-the-board) | | |
 
 ---
 
