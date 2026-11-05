@@ -16,9 +16,26 @@ controller already publishes, so it can keep taking upstream updates.
 > Nothing here was typed by hand. The human role was direction, design
 > approval, hardware bring-up and testing in the car.
 >
+> The models behind it: **`deepseek-v4.1-flash`** did the heavy lifting, with
+> **`gpt-oss-20b`** running under **local inference** on the simpler tasks.
+> `goose` orchestrates them and does the work on the wire.
+>
 > Treat it accordingly: it was built against one specific board (a CrowPanel
 > 7.0" ESP32-S3), it is not security-audited, and the API it consumes is a
 > hobby project's own. Read the code before you flash it.
+
+---
+
+## Contents
+
+| | | |
+|---|---|---|
+| [Credits](#credits) | [6. Updating it in the car](#6-updating-it-in-the-car-over-the-air) | [11. ESP-NOW](#11-esp-now) |
+| [1. What it shows](#1-what-it-shows) | [7. Configuration](#7-configuration) | [12. What this device cannot show](#12-what-this-device-cannot-show) |
+| [2. Hardware](#2-hardware) | [8. Display tuning](#8-display-tuning) | [13. Repository layout](#13-repository-layout) |
+| [3. Data flow](#3-data-flow) | [9. Serial console](#9-serial-console) | [14. Status](#14-status) |
+| [4. Build](#4-build) | [10. What the car can fill](#10-what-the-car-can-fill) | [Licence](#licence) |
+| [5. Before you flash: back up the board](#5-before-you-flash-back-up-the-board) | | [What is not built yet](TODO.md) |
 
 ---
 
@@ -312,9 +329,77 @@ the flashing side of OTA needs no new partition to be useful.
 
 ---
 
-## 6. Configuration
+## 6. Updating it in the car (over the air)
+
+Once the dash is screwed into a pod there is no USB cable, so it can update
+itself from a phone. The dash is **already** a station on the controller's
+access point — that is how it gets its data — so this needs no new networking
+at all:
+
+1. Download `firmware.bin` from the
+   [releases page](https://github.com/adruss85/OpenHaldex-S3-Dash/releases)
+   onto the phone.
+2. Join the controller's access point (`OpenHaldex-C6` by default) — the same
+   thing you do to see the controller's own dashboard.
+3. Open the address shown on the dash's SETTINGS page, under **UPDATE**:
+   `http://192.168.1.203/` (or `http://ohx-dash.local/`).
+4. Choose the file and press **Upload and reboot**. It takes about 15 s for
+   the ~1.6 MB image, and the page reports the version, the slot and how many
+   bytes went in.
+
+Both addresses work because the dash takes a **static** address after the
+first join: the controller's access point hands out no leases when it is also
+sitting on a home LAN with the same subnet, which is a quirk of this setup
+rather than a fault, and the dash learns its way around it.
+
+### The way back, which is the part that matters
+
+Anything written over the air is a **trial** until the dash proves it works.
+
+```
+old image  ->  records "the next boot is on trial" in NVS, then reboots
+new image  ->  boots, brings the panel up, holds it for 20 s
+           ->  stands the trial down: this image is now the confirmed one
+```
+
+If that does not happen, the dash puts the previous image back by itself:
+
+| Give-up condition | Why |
+|---|---|
+| the panel never comes up within 90 s | the image runs, but the thing you look at does not |
+| the trial image has already tried to boot 3 times | a crash loop |
+| a trial told to fail, from the console (`O`) | how the path is tested without a bad build |
+
+The trial lives in its own NVS namespace because the *outgoing* image is the
+one that writes it. The image that is being replaced is never modified: a
+power cut in the middle of a write leaves the running slot untouched and the
+boot selection unchanged, so the dash comes back exactly as it was.
+
+### What it checks, and what it does not
+
+| Check | Enforced |
+|---|---|
+| the file is a real ESP image (magic, checksum) | yes, by the IDF |
+| it is an image for **this chip** (ESP32-S3) | yes, by the IDF — a `.bin` for another chip is refused |
+| it is an image for **this project** | **no** — a valid ESP32-S3 image that is not this dashboard would be accepted, boot, and never stand the trial down. Until that is closed, take the file from this repository's releases page and nothing else |
+
+Nothing is fetched from the internet. The dash never checks for updates: it
+has no idea a newer version exists, which is deliberate — nothing on this
+device reaches out on its own.
+
+### From the console
+
+| Key | |
+|---|---|
+| `o` | where the update page is, which slot is running, whether it is on trial |
+| `O` | bench test: arm the next boot as a *failing* trial and reboot, so the fall-back path is exercised for real. Refused unless the other slot actually holds an image |
+
+---
+
+## 7. Configuration
 
 Defaults match the browser page:
+
 
 | Setting | Default |
 |---|---|
@@ -345,7 +430,7 @@ Boost is **millibar gauge** (above ambient). The controller decodes both MQB
 
 ---
 
-## 7. Display tuning
+## 8. Display tuning
 
 The RGB panel configuration in `src/hal/crowpanel.cpp` is Elecrow's own 7.0"
 description. Symptoms and where to look if a board is reworked or is a
@@ -416,7 +501,7 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 
 ---
 
-## 8. Serial console
+## 9. Serial console
 
 115200 baud on UART0 (the CH340). Besides the boot banner:
 
@@ -467,7 +552,7 @@ carrying it.
 
 ---
 
-## 9. What the car can fill
+## 10. What the car can fill
 
 The dashboard's shape is decided once at boot from what the controller says it
 can feed, not fixed for every car. Two ways of finding out, and which was used
@@ -509,7 +594,7 @@ changed shape while the car was moving would be worse than a widget that reads
 on a guess. `v` on the console forces either band, which is how the unverified
 one gets looked at.
 
-## 10. ESP-NOW
+## 11. ESP-NOW
 
 The controller broadcasts a packed `OhxStatus` struct to the broadcast address
 every 100 ms with **no web stack involved** — no access-point association, no
@@ -589,7 +674,7 @@ Full plan, risks and phase notes: [`docs/esp-now-plan.md`](docs/esp-now-plan.md)
 
 ---
 
-## 11. What this device cannot show
+## 12. What this device cannot show
 
 Data the controller does not expose, or has no room for here:
 
@@ -604,7 +689,7 @@ Data the controller does not expose, or has no room for here:
 
 ---
 
-## 12. Repository layout
+## 13. Repository layout
 
 ```
 platformio.ini              build: ESP32-S3, OPI PSRAM, 4 MB OTA layout
@@ -661,7 +746,7 @@ build needs neither node nor the script.
 
 ---
 
-## 13. Status
+## 14. Status
 
 Working on the bench against a live controller, and now verified in the car:
 
@@ -677,27 +762,36 @@ Working on the bench against a live controller, and now verified in the car:
   actually moves on this car; the capability decision settles to the NoBoost
   band; and **the mode switch works** — a tap on the HALDEX panel, and `m` on
   the console, each got `ok` back from the controller in ~60 ms.
+* **Over the air**: a real 1.7 MB upload from a browser wrote the other slot,
+  rebooted into it *on trial*, and stood the trial down once the panel had
+  held for 20 s. The fall-back was then exercised for real — a trial told to
+  fail handed the car back to the previous slot in both directions
+  (app0 → app1 → app0). A file that is not a firmware image is refused with
+  HTTP 500 and nothing written. Confirmed from a phone on the controller's own
+  access point as well.
 
 **Still to be exercised in the car:** the value scaling for `boost` — none of
 the reference car's data has come from a boost source yet, since a Gen1 Haldex
-has no boost frame at all, and the Full band itself remains unverified.
+has no boost frame at all, and the Full band itself remains unverified. One
+unexplained chip reset was seen 8 s after the first post-update boot while the
+station was re-associating (no panic, clean ROM banner); 180 s of idle running
+afterwards showed no repeats, and the boot banner now prints the reason so it
+can be caught if it happens again.
 
-Order of work from here: the mode switch (done) came **before OTA**, because a
-mounted dash that can change one thing on the car is worth more than one that
-can be reflashed.
+Next: [TODO.md](TODO.md) — what is deliberately not built yet, and why.
 
 Build result:
 
 ```
-RAM:   154 004 / 327 680 B   (47.0%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 633 518 / 1 966 080 B (83.1%) <- of the 1.875 MB OTA slot
+RAM:   155 028 / 327 680 B   (47.3%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 675 258 / 1 966 080 B (85.2%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly
 
 The ESP32-S3 has **512 KB of SRAM**, but only 327 680 B (320 KB) of it is
 addressable as the application's DRAM region — the rest is IRAM and
-ROM-reserved — so `46.8% of 327 680` is the normal way PlatformIO reports it
+ROM-reserved — so `47.3% of 327 680` is the normal way PlatformIO reports it
 for this chip, not a sign that something is missing.
 
 The 8 MB of **PSRAM** is the part that matters here: the two 800x480x16 bpp

@@ -21,6 +21,7 @@
 #include "net/ohx_now.h"
 #include "net/datafeed.h"
 #include "app/capability.h"
+#include "app/ota.h"
 #include "version.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
@@ -37,6 +38,25 @@ uint32_t g_lastStatsMs = 0;
 uint32_t g_frames = 0;
 uint32_t g_renderUs = 0;
 uint32_t g_busyUs = 0;   // the whole loop body, so the sleep cannot hide anything
+
+// esp_reset_reason() in words. The panel and the WiFi share a 5 V rail with
+// very little margin on a USB port, so "brownout" and "panic" have to be told
+// apart from the console rather than guessed at.
+const char *resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external pin";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "PANIC (crash)";
+    case ESP_RST_INT_WDT: return "watchdog: interrupt";
+    case ESP_RST_TASK_WDT: return "watchdog: task";
+    case ESP_RST_WDT: return "watchdog: other";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    case ESP_RST_BROWNOUT: return "BROWNOUT (supply sagged)";
+    case ESP_RST_SDIO: return "SDIO";
+    default: return "unknown";
+  }
+}
 
 void printBanner() {
   Serial.println();
@@ -79,6 +99,10 @@ void printBanner() {
                 (unsigned)(ESP.getPsramSize() / (1024 * 1024)));
   Serial.printf(" heap     : %u B free\n", (unsigned)ESP.getFreeHeap());
   Serial.printf(" sdk      : %s\n", ESP.getSdkVersion());
+  // Why the chip restarted, which is the first question when the dash
+  // reboots in the car and there is nobody watching the console. A brownout
+  // and a panic look identical from the driver's seat.
+  Serial.printf(" reset    : %s\n", resetReasonText());
   Serial.println("=========================================");
 }
 
@@ -225,7 +249,7 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page m=mode");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page m=mode o=ota O=ota-fail-test");
         break;
       case 'v': {
         // Force the tile band, for bench work: the capability decision is made
@@ -246,6 +270,15 @@ void handleSerial() {
         // The mode switch, from the console: identical to tapping the HALDEX
         // panel, so the send path can be exercised without touching the glass.
         ui::cycleHaldexMode();
+        continue;
+      case 'O':
+        // Bench aid: arm the next boot as a failing trial, so the over-the-air
+        // fall-back path is exercised for real. Refused when the other slot is
+        // empty - the point is to test the recovery, not the bootloader.
+        ota::armFailureTest(15000);
+        continue;
+      case 'o':
+        Serial.printf("[ota] %s | page %s\n", ota::stateLine(), ota::url());
         continue;
       case 'e':
 #if OHX_USE_ESP_NOW
@@ -283,6 +316,11 @@ void setup() {
 
   cfg::begin();  // NVS settings first, the panel does not need them
 
+  // Before anything else that can fail: if this image is on trial and has
+  // already failed, this is where the car is handed back to the previous
+  // slot. It does nothing at all in the normal case.
+  ota::begin();
+
   const bool displayOk = crowpanel::begin();
   if (displayOk) {
     ui::begin();
@@ -309,6 +347,10 @@ void loop() {
   // Pumps the ESP-NOW listener (a no-op if this build has it switched off)
   // and logs any change of the source the glass is being fed from.
   feed::poll();
+
+  // The over-the-air trial clock: does nothing unless an update is waiting to
+  // prove itself, in which case this is what confirms it or gives up on it.
+  ota::tick();
 
   // What the car can fill, and the dashboard's shape, decided once. The
   // capability poll does nothing at all once it has settled; the layout is

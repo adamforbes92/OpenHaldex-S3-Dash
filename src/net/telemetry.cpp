@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "app/config.h"
+#include "app/ota.h"
 
 namespace telemetry {
 namespace {
@@ -369,6 +370,13 @@ void netTask(void *) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+
+    // The update page lives on the station's own address, so it can only be
+    // served once there is one. Both calls are trivial when nothing is
+    // happening, and both sit above the polling pause on purpose: a paused
+    // dash must still be updatable.
+    ota::serveBegin();
+    ota::servePoll();
 
     if (g_paused) {
       vTaskDelay(pdMS_TO_TICKS(50));

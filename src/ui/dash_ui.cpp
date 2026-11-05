@@ -36,6 +36,7 @@
 #include "net/ohx_now.h"
 #include "net/datafeed.h"
 #include "app/config.h"
+#include "app/ota.h"
 #include "theme.h"
 #include "ohx_proto.h"
 #include "ui/raw_ui.h"
@@ -164,6 +165,8 @@ struct Widgets {
   // What the controller will accept from us, and with what key. Shown in
   // settings because the credential is a settings field, not a diagnostic.
   lv_obj_t *ctrlLine = nullptr, *ctrlWarn = nullptr;
+  // Where to send a new image, and which slot this one came from.
+  lv_obj_t *otaLine = nullptr;
 } w;
 
 struct Values {
@@ -918,6 +921,16 @@ void buildSettings() {
   w.ctrlWarn = fixedLabel(card, 0, y, 620, 20, FONT_SMALL, COL_AMBER, "");
   y += 30;
 
+  // The update page, and which slot this image came from. Not a button: the
+  // page is served to a phone, and the dash's own glass has nothing to do
+  // with it. Shown here because this is where you look when you are standing
+  // at the car wondering how to get a new build into it.
+  lv_obj_t *upd = label(card, FONT_BODY, COL_DIM, "UPDATE (OVER THE AIR)");
+  lv_obj_set_pos(upd, 0, y);
+  y += 24;
+  w.otaLine = fixedLabel(card, 0, y, 620, 20, FONT_SMALL, COL_DIM, "ota: --");
+  y += 34;
+
   lv_obj_t *disp = label(card, FONT_BODY, COL_DIM, "DISPLAY");
   lv_obj_set_pos(disp, 0, y);
   y += 26;
@@ -1478,6 +1491,12 @@ Timings takeTimings() {
 // field the operator just typed.
 void updateControlStatus() {
   if (!w.ctrlLine) return;
+  if (w.otaLine) {
+    char ubuf[128];
+    snprintf(ubuf, sizeof ubuf, "%s  |  page %s", ota::stateLine(), ota::url());
+    setText(w.otaLine, ubuf);
+    setTextColor(w.otaLine, ota::onTrial() ? COL_AMBER : COL_DIM);
+  }
   const ohxnow::Status s = ohxnow::last();
   char buf[160];
   if (!s.valid) {
