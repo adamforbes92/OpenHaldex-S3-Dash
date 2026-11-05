@@ -600,7 +600,7 @@ rebuilding the libs writes into the shared packages folder.
 
 ## Licence
 
-No licence has been chosen for this repository yet.
+This project is licensed under the **GNU General Public License v3.0 (GPL‑v3)**, which requires that any derivative work also be distributed under the same license. The full text is in the `LICENSE` file.
 
 It depends on **[OpenHaldex-C6](https://github.com/Forbes-Automotive/OpenHaldex-C6)**
 at runtime and copies its wire-format header verbatim — see that project for
