@@ -121,4 +121,53 @@ constexpr int TICK_ROW_H = 18;
 constexpr int RPM_NUM_Y = 132;
 constexpr int RPM_NUM_H = TILE_Y - RPM_NUM_Y;  // 98
 
+// ---------------------------------------------------------- tile band
+// The tile band is the one part of the dashboard that changes shape with the
+// car. Two geometries exist, both approved as mock-ups:
+//
+//   Full     SPEED | BOOST | TEMPERATURES | HALDEX, the widths dash.html
+//            gives them (186 / 186 / 204 / 224) - docs/mockups/B
+//   NoBoost  SPEED | TEMPERATURES | HALDEX, three equal panels - mock-up A,
+//            for a car with no boost source to put in the fourth
+//
+// Which one is used is decided once at boot from what the car can actually
+// feed (app/capability.h) and is never changed while the car is moving.
+enum class Tile : uint8_t { Speed, Boost, Temps, Haldex };
+
+struct TileCol {
+  Tile role;
+  int x, w;
+};
+
+struct TileBand {
+  const TileCol *cols;
+  int count;
+  const char *name;
+};
+
+constexpr TileCol kTilesFull[] = {
+    {Tile::Speed, COL0_X, COL0_W},
+    {Tile::Boost, COL1_X, COL1_W},
+    {Tile::Temps, COL2_X, COL2_W},
+    {Tile::Haldex, COL3_X, COL3_W},
+};
+
+// Three equal panels: 266 / 266 / 268, so the third takes the rounding
+// remainder and the band still ends exactly at the panel edge.
+constexpr int NOBOOST_W = W / 3;
+constexpr TileCol kTilesNoBoost[] = {
+    {Tile::Speed, 0, NOBOOST_W},
+    {Tile::Temps, NOBOOST_W, NOBOOST_W},
+    {Tile::Haldex, 2 * NOBOOST_W, W - 2 * NOBOOST_W},
+};
+
+enum class Variant : uint8_t { Full, NoBoost };
+
+constexpr TileBand kBandFull{kTilesFull, 4, "Full (B)"};
+constexpr TileBand kBandNoBoost{kTilesNoBoost, 3, "NoBoost (A)"};
+
+inline const TileBand &bandFor(Variant v) {
+  return v == Variant::NoBoost ? kBandNoBoost : kBandFull;
+}
+
 }  // namespace layout

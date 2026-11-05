@@ -20,6 +20,7 @@
 #include "net/telemetry.h"
 #include "net/ohx_now.h"
 #include "net/datafeed.h"
+#include "app/capability.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
 #include "ui/raw_ui.h"
@@ -222,8 +223,18 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now x=raw page");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page");
         break;
+      case 'v': {
+        // Force the tile band, for bench work: the capability decision is made
+        // once at boot, and this is how the other band is seen without
+        // pretending to be another car.
+        const layout::Variant next = (ui::layoutVariant() == layout::Variant::Full)
+                                         ? layout::Variant::NoBoost
+                                         : layout::Variant::Full;
+        ui::applyLayout(next);
+        continue;
+      }
       case 'x':
         // The raw telemetry page: every value the dash can see, over both
         // transports, with absent fields shown as "--".
@@ -291,6 +302,20 @@ void loop() {
   // Pumps the ESP-NOW listener (a no-op if this build has it switched off)
   // and logs any change of the source the glass is being fed from.
   feed::poll();
+
+  // What the car can fill, and the dashboard's shape, decided once. The
+  // capability poll does nothing at all once it has settled; the layout is
+  // applied only on the transition, so the console can then force a band by
+  // hand without the decision immediately overwriting it.
+  cap::poll();
+  {
+    static bool layoutApplied = false;
+    const cap::Caps &caps = cap::get();
+    if (caps.settled && !layoutApplied) {
+      layoutApplied = true;
+      ui::applyLayout(caps.variant);
+    }
+  }
 
   if ((uint32_t)(now - g_lastUiMs) >= kUiPeriodMs) {
     g_lastUiMs = now;

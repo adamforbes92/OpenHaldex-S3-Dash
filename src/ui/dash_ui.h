@@ -11,6 +11,8 @@
 
 #include <lvgl.h>
 
+#include "theme.h"  // layout::Variant, chosen from what the car can feed
+
 namespace ui {
 
 /// Build the whole screen. Call once, after crowpanel::begin().
@@ -38,6 +40,12 @@ enum class Page : uint8_t {
 
 void setPage(Page p);
 Page page();
+
+/// Place the tile band: four panels, or three when the car has no boost
+/// source (theme.h). Called once when the capability decision settles, and
+/// by hand from the console. Idempotent.
+void applyLayout(layout::Variant v);
+layout::Variant layoutVariant();
 
 /// Bring-up aid: bit mask selecting which redraw groups stay enabled.
 /// 1 = rev bar, 2 = numbers under the rev bar, 4 = the big rev number,

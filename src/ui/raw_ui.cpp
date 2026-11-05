@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app/capability.h"
 #include "app/config.h"
 #include "net/datafeed.h"
 #include "net/ohx_now.h"
@@ -71,6 +72,7 @@ uint32_t g_lastMs = 0;
 // name here and its row definition below.
 enum Field : uint8_t {
   F_HDR, F_FW, F_GEN, F_MODE, F_NAME, F_SRC, F_CHRSSI, F_PKTS, F_SEQNONCE, F_REJDUP, F_SENDERS,
+  F_CAP_GEN, F_CAP_BOOST, F_CAP_SUPPLY, F_CAP_TEMPS, F_CAP_STEER, F_CAP_LAYOUT,
   F_RPM, F_SPEED, F_THR, F_BOOST, F_LOCKPCT, F_TEMPS, F_SUPPLY, F_SLIP,
   F_FLAGS0, F_FLAGS1, F_FLAGS2, F_FLAGS3,
   F_HRPM, F_HTHR, F_HCOOL, F_HLOCKPCT, F_HAGE,
@@ -99,6 +101,19 @@ const RowDef kRowsA[] = {
     {F_SEQNONCE, "seq / nonce", false},
     {F_REJDUP, "rej / dup / gap", false},
     {F_SENDERS, "senders / age", false},
+};
+
+// What the car can feed, and the shape of the dashboard that follows from
+// it. Detected vs table says how each answer was arrived at: the packet marks
+// a field it has no value for (detected), except boost, which the controller
+// has no sentinel for and which is therefore decided by generation.
+const RowDef kRowsCaps[] = {
+    {F_CAP_GEN, "generation", false},
+    {F_CAP_BOOST, "boost source", false},
+    {F_CAP_SUPPLY, "supply voltage", false},
+    {F_CAP_TEMPS, "haldex temps", false},
+    {F_CAP_STEER, "steering (packet)", false},
+    {F_CAP_LAYOUT, "tile band", false},
 };
 
 const RowDef kRowsB[] = {
@@ -151,7 +166,8 @@ struct Column {
 };
 
 const Column kColumns[3] = {
-    {"ESP-NOW OHX_STATUS", {{nullptr, kRowsA, 11}, {nullptr, nullptr, 0}, {nullptr, nullptr, 0}}, 1},
+    {"ESP-NOW OHX_STATUS",
+     {{nullptr, kRowsA, 11}, {"CAR CAPABILITY", kRowsCaps, 6}, {nullptr, nullptr, 0}}, 2},
     {"PACKET VALUES (10 Hz)", {{nullptr, kRowsB, 8}, {"FLAGS (set bits)", kRowsB + 8, 4}, {nullptr, nullptr, 0}}, 2},
     {"HTTP / DASH", {{"HTTP /api/live", kRowsC, 5}, {"HTTP /api/dashboard", kRowsC + 5, 8}, {"LINK", kRowsC + 13, 6}}, 3},
 };
@@ -410,6 +426,20 @@ void refresh() {
   setText(g_val[F_REJDUP], s);
   snprintf(s, sizeof s, "%lu / %s", (unsigned long)n.senders, fage(b, n.ageMs));
   setText(g_val[F_SENDERS], s);
+
+  // ---- what the car can fill, and the dashboard's shape. "waiting" is not
+  // the same as "no": until the decision settles, nothing has been ruled out.
+  const cap::Caps &cp = cap::get();
+  setText(g_val[F_CAP_GEN], cp.genKnown ? fint(a, cp.generation) : "unknown");
+  const char *waiting = cp.settled ? nullptr : "waiting";
+  setText(g_val[F_CAP_BOOST], waiting ? waiting : (cp.boost ? "yes (table)" : "no (table)"));
+  setText(g_val[F_CAP_SUPPLY],
+          waiting ? waiting : (cp.supplyVoltage ? "yes (detected)" : "no (detected)"));
+  setText(g_val[F_CAP_TEMPS],
+          waiting ? waiting : (cp.haldexTemps ? "yes (detected)" : "no (detected)"));
+  setText(g_val[F_CAP_STEER],
+          waiting ? waiting : (cp.steering ? "yes (detected)" : "no (detected)"));
+  setText(g_val[F_CAP_LAYOUT], layout::bandFor(cp.variant).name);
 
   // ---- column B: the packet's values
   if (p.valid) {

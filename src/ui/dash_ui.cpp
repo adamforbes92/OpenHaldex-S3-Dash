@@ -399,12 +399,21 @@ void buildGauge(lv_obj_t *parent) {
 // The four original sections, at the widths dash.html gives them. BOOST is
 // back as a tile of its own: boost the bar is gone, so the value is shown
 // once, here, with its own small bar and its peak.
+//
+// The four panels are always built; which of them are on the glass, and where
+// they sit, is decided by applyLayout() below from what the car can feed.
+lv_obj_t *g_tileSpeed = nullptr, *g_tileBoost = nullptr;
+lv_obj_t *g_tileTemps = nullptr, *g_tileHaldex = nullptr;
+layout::Variant g_variant = layout::Variant::Full;
+bool g_placed = false;
+
 void buildTiles(lv_obj_t *parent) {
   const int y = L::TILE_Y;
   const int h = L::TILE_H;
 
   // ---- SPEED ------------------------------------------------------
   lv_obj_t *t0 = opaque(parent, L::COL0_X, y, L::COL0_W, h, COL_BG);
+  g_tileSpeed = t0;
   lv_obj_set_style_border_side(t0, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t0, 1, 0);
   lv_obj_set_style_border_color(t0, COL_LINE, 0);
@@ -421,6 +430,7 @@ void buildTiles(lv_obj_t *parent) {
 
   // ---- BOOST ------------------------------------------------------
   lv_obj_t *t1 = opaque(parent, L::COL1_X, y, L::COL1_W, h, COL_BG);
+  g_tileBoost = t1;
   lv_obj_set_style_border_side(t1, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t1, 1, 0);
   lv_obj_set_style_border_color(t1, COL_LINE, 0);
@@ -436,6 +446,7 @@ void buildTiles(lv_obj_t *parent) {
 
   // ---- TEMPERATURES -----------------------------------------------
   lv_obj_t *t2 = opaque(parent, L::COL2_X, y, L::COL2_W, h, COL_BG);
+  g_tileTemps = t2;
   lv_obj_set_style_border_side(t2, LV_BORDER_SIDE_RIGHT, 0);
   lv_obj_set_style_border_width(t2, 1, 0);
   lv_obj_set_style_border_color(t2, COL_LINE, 0);
@@ -458,6 +469,7 @@ void buildTiles(lv_obj_t *parent) {
 
   // ---- HALDEX -----------------------------------------------------
   lv_obj_t *t3 = opaque(parent, L::COL3_X, y, L::COL3_W, h, COL_BG);
+  g_tileHaldex = t3;
 
   cap = label(t3, FONT_CAP, COL_DIM, "HALDEX");
   lv_obj_set_pos(cap, L::TILE_PAD_H, L::TILE_PAD_V);
@@ -480,6 +492,96 @@ void buildTiles(lv_obj_t *parent) {
   lv_obj_t *thr = label(t3, FONT_CAP, COL_FG, "THR");
   lv_obj_set_pos(thr, L::TILE_PAD_H + 4, 170);
   w.thrBar = bar(t3, L::TILE_PAD_H, 186, hw, 12, COL_GREEN, 0, 100);
+}
+
+// ------------------------------------------------------ tile geometry
+// Each panel is built once, above, and then *placed* here. That distinction
+// is the whole trick: changing the band's shape moves and resizes objects
+// that already exist, so nothing is destroyed, no pointer goes stale, and a
+// panel that is not in the chosen band is hidden rather than deleted - which
+// also means the code that fills it in never has to ask whether it exists.
+//
+// Only width-dependent items are touched. A caption sits at the padding edge
+// and a bar starts at it, whatever the panel's width, so those do not move.
+void placeSpeedTile(lv_obj_t *t, int x, int width, int height) {
+  lv_obj_set_pos(t, x, L::TILE_Y);
+  lv_obj_set_size(t, width, height);
+  lv_obj_set_pos(w.speedVal, L::TILE_PAD_H - 2, 44);
+  lv_obj_set_pos(w.speedPeak, L::TILE_PAD_H, height - 24);
+  lv_obj_set_width(w.speedPeak, width - 2 * L::TILE_PAD_H);
+}
+
+void placeBoostTile(lv_obj_t *t, int x, int width, int height) {
+  lv_obj_set_pos(t, x, L::TILE_Y);
+  lv_obj_set_size(t, width, height);
+  const int bw = width - 2 * L::TILE_PAD_H;
+  lv_obj_set_width(w.boostVal, bw);
+  lv_obj_set_width(w.boostUnit, bw);
+  lv_obj_set_width(w.boostBar, bw);
+  lv_obj_set_pos(w.boostPeak, L::TILE_PAD_H, height - 24);
+  lv_obj_set_width(w.boostPeak, bw);
+}
+
+void placeTempsTile(lv_obj_t *t, int x, int width, int height) {
+  lv_obj_set_pos(t, x, L::TILE_Y);
+  lv_obj_set_size(t, width, height);
+  const int tw = width - 2 * L::TILE_PAD_H;
+  lv_obj_set_pos(w.coolVal, L::TILE_PAD_H + tw - 92, 34);
+  lv_obj_set_width(w.coolBar, tw);
+  lv_obj_set_pos(w.oilVal, L::TILE_PAD_H + tw - 92, 110);
+  lv_obj_set_width(w.oilBar, tw);
+}
+
+void placeHaldexTile(lv_obj_t *t, int x, int width, int height) {
+  lv_obj_set_pos(t, x, L::TILE_Y);
+  lv_obj_set_size(t, width, height);
+  const int hw = width - 2 * L::TILE_PAD_H;
+  lv_obj_set_width(w.modeVal, hw);
+  lv_obj_set_width(w.haldexSub, hw);
+  lv_obj_set_pos(w.lockReqVal, width - 110, 94);
+  lv_obj_set_pos(w.lockActVal, width - 110, 128);
+  lv_obj_set_width(w.thrBar, hw);
+}
+
+// Called once, when the capability decision settles, and by hand from the
+// console for bench work. Idempotent: re-applying the same band re-places the
+// same pixels and repaints nothing.
+void placeBand(layout::Variant v) {
+  const layout::TileBand &band = layout::bandFor(v);
+  const bool changed = (v != g_variant) || !g_placed;
+  bool boostShown = false;
+
+  for (int i = 0; i < band.count; i++) {
+    const layout::TileCol &c = band.cols[i];
+    switch (c.role) {
+      case layout::Tile::Speed: placeSpeedTile(g_tileSpeed, c.x, c.w, L::TILE_H); break;
+      case layout::Tile::Boost:
+        placeBoostTile(g_tileBoost, c.x, c.w, L::TILE_H);
+        boostShown = true;
+        break;
+      case layout::Tile::Temps: placeTempsTile(g_tileTemps, c.x, c.w, L::TILE_H); break;
+      case layout::Tile::Haldex: placeHaldexTile(g_tileHaldex, c.x, c.w, L::TILE_H); break;
+    }
+  }
+  // Hidden, not deleted: a panel the car cannot fill must stop drawing, but
+  // the widgets in it are still updated by the readout pass, which is cheaper
+  // and simpler than making every readout ask whether its panel exists.
+  if (g_tileBoost) {
+    if (boostShown) {
+      lv_obj_remove_flag(g_tileBoost, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_tileBoost, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  g_variant = v;
+  g_placed = true;
+
+  if (changed) {
+    // The panels that just moved or appeared have to be repainted, and so
+    // does the strip the hidden one used to occupy.
+    if (w.root) lv_obj_invalidate(w.root);
+    Serial.printf("[ui] tile band %s (%d panels)\n", band.name, band.count);
+  }
 }
 
 // ---------------------------------------------------------- status bar
@@ -1046,6 +1148,8 @@ void begin() {
 
   buildGauge(w.root);
   buildTiles(w.root);
+  placeBand(g_variant);  // the panels are built with the full band's geometry;
+                         // this is what makes the log line and g_placed true
   buildStatusBar(w.root);
 
   // Long-press the top band opens settings, as the tach ring used to: it is
@@ -1248,6 +1352,12 @@ void setPage(Page p) {
 }
 
 Page page() { return g_page; }
+
+// Which tile band the glass is showing, and a way to change it. The capability
+// decision calls this once when it settles; the console can call it by hand.
+void applyLayout(layout::Variant v) { placeBand(v); }
+
+layout::Variant layoutVariant() { return g_variant; }
 
 bool settingsOpen() { return g_page == Page::Settings; }
 
