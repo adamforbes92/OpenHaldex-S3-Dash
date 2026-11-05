@@ -18,8 +18,13 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 conv="${LV_FONT_CONV:-node $here/lv_font_conv.js}"
-ttf="$here/fonts/Montserrat-Bold.ttf"
-out="$root/src/ui/fonts"
+ttf="tools/fonts/Montserrat-Bold.ttf"
+out="src/ui/fonts"
+
+# Generate from the repo root with relative paths: lv_font_conv records the
+# command in the file header, and an absolute path there would bake one
+# developer's checkout directory into the committed source.
+cd "$root"
 
 [ -f "$ttf" ] || { echo "missing $ttf" >&2; exit 1; }
 mkdir -p "$out"

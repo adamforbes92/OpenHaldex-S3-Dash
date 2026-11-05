@@ -18,7 +18,7 @@ import time
 
 import serial
 
-log_path = sys.argv[1] if len(sys.argv) > 1 else "/home/adam/.goose_tmp/console.log"
+log_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ohx-console.log"
 secs = float(sys.argv[2]) if len(sys.argv) > 2 else 900.0
 port = sys.argv[3] if len(sys.argv) > 3 else "/dev/ttyUSB0"
 baud = int(sys.argv[4]) if len(sys.argv) > 4 else 115200

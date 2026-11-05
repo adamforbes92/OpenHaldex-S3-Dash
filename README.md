@@ -198,7 +198,7 @@ its socket table with `TIME_WAIT` entries.
 ## 4. Build
 
 ```bash
-cd /home/adam/OpenHaldex-S3-Dash
+cd OpenHaldex-S3-Dash
 ./.venv/bin/pio run -e s3-dash
 ```
 
