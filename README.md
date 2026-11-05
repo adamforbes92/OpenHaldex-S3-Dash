@@ -391,6 +391,8 @@ source is printed at boot, and `p` on the serial console steps the clock down
 |---|---|
 | `1`..`5` | toggle redraw groups: rev bar, tick numbers, big number, tile readouts, status bar |
 | `0` / `9` | all on / all off |
+| `r` | try the next GT911 axis mapping (see the touch note below) |
+| `t` | reset the touch probe |
 | `p` | step the pixel clock down one notch |
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
 | `n` | pause / resume the HTTP polling |
@@ -510,6 +512,8 @@ tools/
   make_fonts.sh             regenerate src/ui/fonts from tools/fonts/*.ttf
   mockup_dash.py            draw the layout at panel size before coding it
   serial_capture.py         reset + read the console (read-only)
+  serial_watch.py           read the console without resetting the board
+  serial_shell.py           hold the port open: log + send keys, no reset
   serial_cmd.py             send one console command
   serial_seq.py             drive a timed sequence of console commands
   serial_tune.py            mask sweep: render cost per redraw group
@@ -539,6 +543,8 @@ docs/
 | Stale behaviour | **done** — the data stays on the glass and only the status light changes; proved by diffing frame dumps (§8) |
 | ESP-NOW receive (phase 1) | **done** — 84-byte `OHX_STATUS` at ~9.7-10.6 Hz, 0 rejects, layout verified against the raw hexdump, costs no render rate |
 | ESP-NOW drives the dashboard (phase 2) | **done** — `rpm`/`speed`/`throttle`/`boost`/`lock*`/`oil` and the brake, handbrake, coupling, temp-protection and CAN flags come from the packet; coolant and the TC/ASR/AWD lamps stay on HTTP; the HTTP fallback and the both-gone stale path were both staged on the bench (§3) |
+| Touch input | **done** — the GT911's axes are mirrored by the library's default (`ROTATION_NORMAL` returns `width-x, height-y`): every press landed 180 degrees from the finger, so no button ever fired while the long press still worked (it is on the whole top band). Fixed with `ROTATION_INVERTED`; a tap on SETTINGS now reads ~(741, 465), which is where it is drawn |
+| Settings page scroll | **done** — the card was repainting 780x420 px per step *plus* everything under it, and the dashboard kept invalidating 30x a second behind it: 67-84 ms per frame, 11-14 fps. The dashboard is now hidden while the page is up, the backdrop is opaque and `ui::tick()` stands still, which took a drag to ~9 ms per frame |
 | Bar redesign (ring -> one bar) | **done** — the tach ring was ~34 ms and the needle's dirty patch ~23.5 ms of a 58.8 ms frame; the mask sweep is now flat across every redraw group at the unchanged 16 MHz pixel clock (`docs/redesign-bars.md`) |
 | On-car test | not yet |
 

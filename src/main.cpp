@@ -127,6 +127,18 @@ void printStats() {
   Serial.printf("[stats] ms/tick: gauge %.2f readouts %.2f conn %.2f  (mask 0x%04X)\n",
                 (t.gaugeUs / 1000.0f) / n, (t.readoutsUs / 1000.0f) / n,
                 (t.connUs / 1000.0f) / n, ui::debugMask());
+
+  // Where the touch samples actually land, and how steady the press is. A
+  // mirrored axis shows up as a point in the wrong corner; a flickering press
+  // shows up as a large "edges" count (a finger held down should be one edge).
+  const crowpanel::TouchProbe tp = crowpanel::touchProbe();
+  if (tp.count) {
+    Serial.printf("[stats] touch %lu pts, %lu edges, read<= %.2f ms, x %ld..%ld y %ld..%ld, "
+                  "last %ld,%ld %s\n",
+                  (unsigned long)tp.count, (unsigned long)tp.edges, tp.maxReadUs / 1000.0f,
+                  (long)tp.minX, (long)tp.maxX, (long)tp.minY, (long)tp.maxY, (long)tp.lastX,
+                  (long)tp.lastY, tp.lastPressed ? "down" : "up");
+  }
   // "ms/loop" is the render only; "ms/busy" is the whole loop body minus the
   // sleep. They should be the same number: if they ever drift apart, something
   // outside LVGL is blocking.
@@ -161,6 +173,16 @@ void handleSerial() {
       case '5': g_mask ^= 0x0010; break;  // status bar
       case '0': g_mask = 0xFFFF; break;   // everything on
       case '9': g_mask = 0x0000; break;   // everything off
+      case 'r':
+        // Which way the GT911's axes map onto the panel. Wrong here and every
+        // press lands on some other widget: taps do nothing while a long
+        // press, which is on a huge target, still works.
+        Serial.printf("[dbg] touch rotation -> %s\n", crowpanel::cycleTouchRotation());
+        break;
+      case 't':
+        crowpanel::resetTouchProbe();
+        Serial.println("[dbg] touch probe reset");
+        break;
       case 'p': {
         // Step the panel's pixel clock. The panel reads its frame buffer
         // out of PSRAM at ~2 bytes per PCLK, so this is a direct dial on

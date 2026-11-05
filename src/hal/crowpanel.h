@@ -75,4 +75,25 @@ struct Status {
 };
 const Status &status();
 
+/// Running record of the touch samples, kept so the panel's axes can be
+/// identified from a capture taken *after* the gesture instead of having to
+/// watch the console live.
+struct TouchProbe {
+  uint32_t count;      // samples with a finger down
+  uint32_t edges;      // pressed <-> released transitions (flicker detector)
+  uint32_t maxReadUs;  // worst I2C round trip inside touchRead()
+  int32_t minX, maxX, minY, maxY;
+  int32_t lastX, lastY;
+  bool lastPressed;
+};
+TouchProbe touchProbe();
+void resetTouchProbe();
+
+/// Try the GT911's next axis mapping, live. The controller's axes need not
+/// line up with the panel's and TAMC_GT911 handles direction in software
+/// (readPoint() mirrors the raw point for ROTATION_NORMAL, which is not
+/// obviously right for this glass). Returns the name of the mapping now in
+/// use; the probe is reset so samples are not mixed between mappings.
+const char *cycleTouchRotation();
+
 }  // namespace crowpanel

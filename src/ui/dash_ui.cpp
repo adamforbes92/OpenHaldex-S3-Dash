@@ -50,6 +50,11 @@ const char *const kModeNames[6] = {"STOCK", "FWD", "50:50", "60:40", "75:25", "E
 
 // ------------------------------------------------------------- handles
 struct Widgets {
+  // The dashboard's own root: bar, number, tiles and status bar live in it so
+  // the whole thing can be hidden while the settings page is up. LVGL 9 has no
+  // "covered by an opaque object" skip, so anything left visible under the
+  // settings card would be redrawn with it on every scroll step.
+  lv_obj_t *root = nullptr;
   lv_obj_t *top = nullptr;  // the whole top band; long-press opens settings
 
   // The rev bar, its cells, the row of numbers under it and the big number's
@@ -673,8 +678,12 @@ void buildSettings() {
   lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_size(w.settings, L::W, L::H);
   lv_obj_set_pos(w.settings, 0, 0);
-  lv_obj_set_style_bg_color(w.settings, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(w.settings, 214, 0);
+  // Opaque, not the 214/255 it was: a translucent backdrop is blended over
+  // the entire card area every frame and then completely covered by the card,
+  // which is pure cost. It looked like a dimmed dashboard before; with the
+  // dashboard hidden behind it, near-black is the same picture.
+  lv_obj_set_style_bg_color(w.settings, lv_color_hex(0x080a0d), 0);
+  lv_obj_set_style_bg_opa(w.settings, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(w.settings, 0, 0);
   lv_obj_set_style_pad_all(w.settings, 0, 0);
   lv_obj_add_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
@@ -1013,9 +1022,13 @@ void begin() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  buildGauge(scr);
-  buildTiles(scr);
-  buildStatusBar(scr);
+  // Everything on the glass goes in one container: hiding it is what makes
+  // the settings page cheap to scroll.
+  w.root = opaque(scr, 0, 0, L::W, L::H, COL_BG);
+
+  buildGauge(w.root);
+  buildTiles(w.root);
+  buildStatusBar(w.root);
 
   // Long-press the top band opens settings, as the tach ring used to: it is
   // the whole band above the tiles, which beats the 24 px status-bar buttons
@@ -1124,6 +1137,12 @@ void tick() {
       g_peaks.boost = isnan(g_peaks.boost) ? l.boost : fmaxf(g_peaks.boost, l.boost);
   }
 
+  // The settings page is modal and the dashboard is hidden behind it, so
+  // there is nothing to update: leaving the tick running would invalidate the
+  // bar, the number, the tiles and the status bar 30+ times a second under the
+  // card, and each of those areas drags a full card repaint with it.
+  if (g_settingsOpen) return;
+
   uint32_t t0 = micros();
   // The rev bar and the big number run at the full rate: the bar's edge is
   // what the eye tracks now that the needle is gone.
@@ -1178,11 +1197,18 @@ void showSettings(bool visible) {
     lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(w.settings);
     lv_obj_add_flag(w.kb, LV_OBJ_FLAG_HIDDEN);
+    // Take the dashboard off the glass entirely. It is hidden rather than
+    // merely covered because a scroll step repaints the card's whole area and
+    // LVGL would draw everything under it first: a hidden object is not drawn
+    // at all, a covered one still is.
+    if (w.root) lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_keyboard_set_textarea(w.kb, nullptr);
     lv_obj_add_flag(w.kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
+    if (w.root) lv_obj_remove_flag(w.root, LV_OBJ_FLAG_HIDDEN);
   }
+  Serial.printf("[ui] settings %s\n", visible ? "open" : "closed");
 }
 
 bool settingsOpen() { return g_settingsOpen; }

@@ -128,15 +128,38 @@ void displayFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *pxMap) {
   lv_display_flush_ready(disp);
 }
 
+// Running record of the touch samples (see crowpanel.h). Declared before
+// touchRead() because that is what fills it in.
+TouchProbe g_probe = {0, 0, 0, INT32_MAX, INT32_MIN, INT32_MAX, INT32_MIN, 0, 0, false};
+uint8_t g_touchRot = 0;
+
 void touchRead(lv_indev_t *indev, lv_indev_data_t *data) {
   (void)indev;
+  const uint32_t t0 = micros();
   g_touch.read();
-  if (g_touch.isTouched) {
+  const uint32_t dtUs = micros() - t0;
+  if (dtUs > g_probe.maxReadUs) g_probe.maxReadUs = dtUs;
+
+  const bool pressed = g_touch.isTouched;
+  if (pressed) {
+    const int32_t x = (int32_t)g_touch.points[0].x;
+    const int32_t y = (int32_t)g_touch.points[0].y;
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = (int32_t)g_touch.points[0].x;
-    data->point.y = (int32_t)g_touch.points[0].y;
+    data->point.x = x;
+    data->point.y = y;
+    g_probe.count++;
+    if (x < g_probe.minX) g_probe.minX = x;
+    if (x > g_probe.maxX) g_probe.maxX = x;
+    if (y < g_probe.minY) g_probe.minY = y;
+    if (y > g_probe.maxY) g_probe.maxY = y;
+    g_probe.lastX = x;
+    g_probe.lastY = y;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
+  }
+  if (pressed != g_probe.lastPressed) {
+    g_probe.lastPressed = pressed;
+    g_probe.edges++;
   }
 }
 
@@ -255,6 +278,35 @@ bool startPanel() {
 
 }  // namespace
 
+// ------------------------------------------------------- touch bench aids
+// The controller's axes need not line up with the panel's, and the library
+// handles direction in software: readPoint() returns the raw point mirrored
+// for ROTATION_NORMAL, mirrored on one axis for LEFT/RIGHT and untouched for
+// ROTATION_INVERTED. Which one is right for this glass has to be measured,
+// not guessed, and 'r' on the console walks the four live.
+TouchProbe touchProbe() { return g_probe; }
+
+void resetTouchProbe() {
+  g_probe.count = 0;
+  g_probe.edges = 0;
+  g_probe.maxReadUs = 0;
+  g_probe.minX = INT32_MAX;
+  g_probe.maxX = INT32_MIN;
+  g_probe.minY = INT32_MAX;
+  g_probe.maxY = INT32_MIN;
+  g_probe.lastPressed = false;
+}
+
+const char *cycleTouchRotation() {
+  static const uint8_t rots[] = {ROTATION_NORMAL, ROTATION_INVERTED, ROTATION_LEFT, ROTATION_RIGHT};
+  static const char *names[] = {"mirror both (w-x, h-y)", "none (x, y)", "left (w-y, x)",
+                                "right (y, h-x)"};
+  g_touchRot = (uint8_t)((g_touchRot + 1) % 4);
+  g_touch.setRotation(rots[g_touchRot]);
+  resetTouchProbe();
+  return names[g_touchRot];
+}
+
 bool begin() {
   // I2C first: the expander holds the panel in reset.
   // The GT911 reads its whole 185-byte configuration block in one
@@ -334,7 +386,21 @@ bool begin() {
 
   // Touch shares the I2C bus, so it comes up after the reset sequence.
   g_touch.begin();
-  g_touch.setRotation(ROTATION_NORMAL);
+  // TAMC_GT911::begin() calls Wire.begin(sda, scl) with no clock. On this
+  // core that only warns ("Bus already started") rather than re-initialising,
+  // so the 400 kHz set above survives - but say it again rather than depend on
+  // that, because every touch sample is three round trips.
+  Wire.setClock(BOARD_I2C_HZ);
+
+  // ROTATION_INVERTED is the one that leaves the controller's axes alone, and
+  // that is what this glass needs. The other three move the point: measured on
+  // this panel, a finger held in the bottom-right corner (785, 475) arrived as
+  // (15, 5) under the library's own default (ROTATION_NORMAL, which returns
+  // width-x, height-y). Every press was therefore landing 180 degrees away
+  // from the finger: taps hit whatever was opposite them - so no button ever
+  // fired - while the long press still worked, because it is on the whole top
+  // band and a mirrored press usually lands inside it.
+  g_touch.setRotation(ROTATION_INVERTED);
   g_status.touchOk = true;  // the GT911 has no reliable presence query here
 
   lv_indev_t *indev = lv_indev_create();
