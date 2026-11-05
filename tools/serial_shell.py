@@ -24,7 +24,18 @@ port = sys.argv[3] if len(sys.argv) > 3 else "/dev/ttyUSB0"
 baud = int(sys.argv[4]) if len(sys.argv) > 4 else 115200
 cmd_path = log_path + ".cmd"
 
-ser = serial.Serial(port, baud, timeout=0.1)
+# Drop the auto-reset lines as the port opens, so this does not reboot the
+# board. Set before open so they are never asserted, then again after, in case
+# the driver ignored it. (Same trick as serial_watch.py.)
+ser = serial.Serial()
+ser.port = port
+ser.baudrate = baud
+ser.timeout = 0.1
+ser.dtr = False
+ser.rts = False
+ser.open()
+ser.dtr = False
+ser.rts = False
 time.sleep(0.1)
 ser.reset_input_buffer()
 
