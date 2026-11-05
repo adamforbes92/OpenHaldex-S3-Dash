@@ -47,6 +47,12 @@ Page page();
 void applyLayout(layout::Variant v);
 layout::Variant layoutVariant();
 
+/// Step the Haldex mode on: the same thing a tap on the HALDEX panel does.
+/// Stock -> FWD -> 50:50 -> 60:40 -> 75:25 -> Expert -> Stock. The request
+/// goes to the controller over ESP-NOW and its answer appears on the panel's
+/// sub-line. Exposed so the console can drive it for bench work.
+void cycleHaldexMode();
+
 /// Bring-up aid: bit mask selecting which redraw groups stay enabled.
 /// 1 = rev bar, 2 = numbers under the rev bar, 4 = the big rev number,
 /// 8 = tile readouts, 16 = status bar. Clearing a bit stops that group from

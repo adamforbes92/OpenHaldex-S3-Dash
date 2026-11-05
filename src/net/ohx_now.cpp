@@ -1,11 +1,20 @@
 // =====================================================================
-// ohx_now.cpp - ESP-NOW listener for the C6's OHX_STATUS broadcast.
+// ohx_now.cpp - the ESP-NOW link to the C6.
 //
-// Nothing here sends. It validates the shared wire format, decodes it and
-// counts what arrives, so the HTTP dashboard can be compared against it
-// packet by packet before anything is switched over.
+// Receives and decodes the OHX_STATUS broadcast, and sends the one command
+// class this dash raises: OHX_C_MODE, from a tap on the HALDEX panel. The
+// send path is small and deliberate - build the 22-byte OhxCommand, sign
+// everything before the hmac field with HMAC-SHA256 keyed on the controller's
+// access-point password, unicast it to the address the last status came from,
+// and read the answer out of the ack fields of the next broadcast.
 // =====================================================================
 #include "net/ohx_now.h"
+
+#include <mbedtls/md.h>
+
+#include <cstring>
+
+#include "app/config.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -31,6 +40,21 @@ bool g_peerAdded = false;
 uint32_t g_readyAtMs = 0;
 
 uint32_t g_lastPacketMs = 0;        // millis() of the last accepted packet
+
+// ---- the command path. Everything here is written by the UI task and read
+// by the receive callback (or the other way round), so only plain scalars and
+// the module's existing critical section are used - no allocation, no locks
+// held across a send.
+uint8_t g_ownMac[6] = {};           // so an ack can be recognised as ours
+uint8_t g_cmdSeq = 0;               // our own counter, matched against ackSeq
+uint32_t g_lastCmdMs = 0;
+volatile bool g_ackValid = false;
+volatile uint8_t g_ackResult = 0, g_ackSeq = 0;
+volatile uint32_t g_ackMs = 0;
+uint32_t g_lastStatusMs = 0;        // when the nonce we would sign against arrived
+uint32_t g_lastNonce = 0;
+volatile bool g_lastCtrlAccept = false;
+uint8_t g_lastSender[6] = {};
 uint32_t g_lastSeqFrom[4] = {0};    // per-sender: seq of the previous packet
 uint8_t g_senderMac[4][6] = {};
 int g_senderCount = 0;
@@ -125,7 +149,29 @@ void decode(const uint8_t *p, size_t len, const uint8_t *src, int16_t rssi, uint
 
   memcpy(out.name, st.name, sizeof(st.name));
   out.name[24] = '\0';
+  memcpy(out.ackSrc, st.ackSrc, 2);
+  out.ackSeq = st.ackSeq;
+  out.ackResult = st.ackResult;
   out.valid = true;
+
+  // Is that ack ours? The controller reports the last two bytes of the MAC
+  // that sent the command, and only the last command it accepted, so a match
+  // on both means this packet carries the verdict on what we asked for.
+  // The nonce to sign the next command with, and whether the controller says
+  // it accepts commands at all. Latched here because this runs on the WiFi
+  // task and the UI task must not read the packet structure mid-update.
+  g_lastNonce = out.nonce;
+  g_lastStatusMs = millis();
+  g_lastCtrlAccept = out.ctrlAccept;
+  memcpy(g_lastSender, out.src, 6);
+
+  if (g_cmdSeq != 0 && out.ackSeq == g_cmdSeq && out.ackSrc[0] == g_ownMac[4] &&
+      out.ackSrc[1] == g_ownMac[5]) {
+    g_ackResult = out.ackResult;
+    g_ackSeq = out.ackSeq;
+    g_ackMs = millis();
+    g_ackValid = true;
+  }
   (void)len;
 }
 
@@ -265,10 +311,11 @@ bool begin() {
     return false;
   }
   esp_now_register_recv_cb(onRecv);
+  WiFi.macAddress(g_ownMac);  // to tell our own ack from anyone else's
 
-  // A peer entry is only needed to *send*. Registering the broadcast address
-  // now means Phase 3 (commands) has the plumbing in place, and it gives a
-  // definite answer to "does the peer table accept a peer on this interface".
+  // A peer entry is only needed to *send*. The broadcast peer is registered
+  // here so the peer table is exercised from boot, and a command to a specific
+  // controller (sendMode) adds that controller's unicast peer on demand.
   esp_now_peer_info_t peer = {};
   memset(peer.peer_addr, 0xFF, 6);
   peer.channel = 0;  // 0 = whatever channel the station is on: we follow the C6
@@ -361,6 +408,65 @@ bool setEnabled(const bool on) {
   g_readyAtMs = millis();  // a re-enable waits one retry interval, as at boot
   Serial.println("[now] listener off");
   return true;
+}
+
+bool sendMode(uint8_t mode) {
+  if (!g_enabled || mode > 5) return false;
+  // Nothing to sign against until the controller has spoken: the nonce in the
+  // packet is part of what makes the signature single-use.
+  if (g_lastStatusMs == 0 || (uint32_t)(millis() - g_lastStatusMs) > 2000) return false;
+
+  OhxCommand c = {};
+  c.h.magic[0] = OHX_MAGIC0;
+  c.h.magic[1] = OHX_MAGIC1;
+  c.h.type = OHX_T_COMMAND;
+  c.h.proto = OHX_PROTO;
+  c.nonce = g_lastNonce;
+  c.seq = ++g_cmdSeq;
+  c.cmd = OHX_C_MODE;
+  c.arg[0] = mode;
+
+  // HMAC-SHA256 over everything before the hmac field, keyed with the
+  // controller's access-point password - the same string the station joins
+  // with. An open access point means an empty key, which is a key, not the
+  // absence of one; see the warning in the settings page.
+  const char *key = cfg::get().pass;
+  uint8_t full[32];
+  const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  mbedtls_md_hmac(md, (const uint8_t *)key, strlen(key), (const uint8_t *)&c,
+                  offsetof(OhxCommand, hmac), full);
+  memcpy(c.hmac, full, 8);
+
+  // Unicast to the controller we last heard from. The broadcast peer is
+  // registered for sending, but a command is a message to one car.
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, g_lastSender, 6);
+  peer.channel = 0;  // follow the station's channel
+  peer.ifidx = WIFI_IF_STA;
+  peer.encrypt = false;
+  const esp_err_t perr = esp_now_add_peer(&peer);
+  if (perr != ESP_OK && perr != ESP_ERR_ESPNOW_EXIST) {
+    Serial.printf("[now] command peer add failed: %d\n", (int)perr);
+    return false;
+  }
+
+  g_ackValid = false;  // this command is the one the next ack can be about
+  const esp_err_t serr = esp_now_send(g_lastSender, (const uint8_t *)&c, sizeof(c));
+  g_lastCmdMs = millis();
+  if (serr != ESP_OK) {
+    Serial.printf("[now] send failed: %d\n", (int)serr);
+    return false;
+  }
+  return true;
+}
+
+Ack lastAck() {
+  Ack a{};
+  a.valid = g_ackValid;
+  a.result = g_ackResult;
+  a.seq = g_ackSeq;
+  a.ageMs = g_ackValid ? (uint32_t)(millis() - g_ackMs) : UINT32_MAX;
+  return a;
 }
 
 Stats stats() {

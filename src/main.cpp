@@ -225,7 +225,7 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page m=mode");
         break;
       case 'v': {
         // Force the tile band, for bench work: the capability decision is made
@@ -241,6 +241,11 @@ void handleSerial() {
         // The raw telemetry page: every value the dash can see, over both
         // transports, with absent fields shown as "--".
         rawui::toggle();
+        continue;
+      case 'm':
+        // The mode switch, from the console: identical to tapping the HALDEX
+        // panel, so the send path can be exercised without touching the glass.
+        ui::cycleHaldexMode();
         continue;
       case 'e':
 #if OHX_USE_ESP_NOW
