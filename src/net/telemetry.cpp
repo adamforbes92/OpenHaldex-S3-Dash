@@ -324,6 +324,11 @@ void pollDash() {
     v.awdWarning = doc["awdWarning"] | false;
     v.couplingOpen = doc["couplingOpen"] | false;
     v.tempProtection = doc["tempProtection"] | false;
+    // The CAN view of the pedals, and the steering angle the JSON path
+    // gated off for Gen1. Reported as null by the C6 when unknown.
+    v.brakeFromCAN = intOrMinus1(doc["brakeFromCAN"]);
+    v.handbrakeFromCAN = intOrMinus1(doc["handbrakeFromCAN"]);
+    v.steeringAngle = numOrNan(doc["steeringAngle"]);
     v.everOk = true;
     v.ageMs = 0;
     g_dashOkMs = now;
@@ -398,7 +403,7 @@ void setPaused(bool paused) {
 void begin() {
   g_live = Live{NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, false, UINT32_MAX};
   g_dash = Dash{-1, -1, -1, -1, false, false, false, false, false, false,
-                false, false, false, false, UINT32_MAX};
+                false, false, false, false, UINT32_MAX, NAN, -1, -1};
   g_stats = Stats{};
 
   xTaskCreatePinnedToCore(netTask, "ohxnet", 10240, nullptr, 4, nullptr, 0);

@@ -36,6 +36,7 @@
 #include "net/datafeed.h"
 #include "app/config.h"
 #include "theme.h"
+#include "ui/raw_ui.h"
 
 namespace ui {
 namespace {
@@ -108,7 +109,8 @@ uint32_t g_gaugeUs = 0, g_readoutsUs = 0, g_connUs = 0, g_calls = 0;
 bool g_dbgHideAll = false;
 uint32_t g_lastFlashMs = 0;
 uint32_t g_lastTickMs = 0;
-bool g_settingsOpen = false;
+// Which page is on the glass; Page::Dashboard means the dashboard is.
+Page g_page = Page::Dashboard;
 bool g_stale = true;
 
 // Which cells of the rev bar are currently lit: 1 lit, 0 dark, -1 unknown.
@@ -673,6 +675,12 @@ void onCfgDefaults(lv_event_t *) {
 
 void onCfgClose(lv_event_t *) { showSettings(false); }
 
+void onCfgRaw(lv_event_t *) {
+  // One tap from settings. setPage() closes settings on the way in, so the
+  // raw page is never stacked on top of the card.
+  rawui::show(true);
+}
+
 void buildSettings() {
   w.settings = lv_obj_create(lv_layer_top());
   lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_SCROLLABLE);
@@ -750,6 +758,7 @@ void buildSettings() {
   addStepper(card, y, "Boost crit (mbar)", &g_edit.boostCrit, 100, 0, 5000, 0); y += 40;
 
   button(card, 0, y, 90, 30, "DEFAULTS", onCfgDefaults);
+  button(card, 100, y, 82, 30, "RAW DATA", onCfgRaw);
   button(card, 600, y, 74, 30, "SAVE", onCfgSave);
   button(card, 682, y, 70, 30, "CLOSE", onCfgClose);
 
@@ -1137,11 +1146,11 @@ void tick() {
       g_peaks.boost = isnan(g_peaks.boost) ? l.boost : fmaxf(g_peaks.boost, l.boost);
   }
 
-  // The settings page is modal and the dashboard is hidden behind it, so
+  // A modal page is on the glass and the dashboard is hidden behind it, so
   // there is nothing to update: leaving the tick running would invalidate the
-  // bar, the number, the tiles and the status bar 30+ times a second under the
-  // card, and each of those areas drags a full card repaint with it.
-  if (g_settingsOpen) return;
+  // bar, the number, the tiles and the status bar 30+ times a second under
+  // it, and each of those areas drags a full repaint with it.
+  if (g_page != Page::Dashboard) return;
 
   uint32_t t0 = micros();
   // The rev bar and the big number run at the full rate: the bar's edge is
@@ -1187,30 +1196,50 @@ Timings takeTimings() {
 }
 
 void showSettings(bool visible) {
-  g_settingsOpen = visible;
-  if (!w.settings) return;
   if (visible) {
     g_edit = cfg::get();
     lv_textarea_set_text(g_taSsid, g_edit.ssid);
     lv_textarea_set_text(g_taPass, g_edit.pass);
     lv_textarea_set_text(g_taHost, g_edit.host);
-    lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(w.settings);
-    lv_obj_add_flag(w.kb, LV_OBJ_FLAG_HIDDEN);
-    // Take the dashboard off the glass entirely. It is hidden rather than
-    // merely covered because a scroll step repaints the card's whole area and
-    // LVGL would draw everything under it first: a hidden object is not drawn
-    // at all, a covered one still is.
-    if (w.root) lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
-  } else {
+  } else if (w.kb) {
     lv_keyboard_set_textarea(w.kb, nullptr);
     lv_obj_add_flag(w.kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
-    if (w.root) lv_obj_remove_flag(w.root, LV_OBJ_FLAG_HIDDEN);
   }
-  Serial.printf("[ui] settings %s\n", visible ? "open" : "closed");
+  setPage(visible ? Page::Settings : Page::Dashboard);
 }
 
-bool settingsOpen() { return g_settingsOpen; }
+// One place that decides what is on the glass. Everything else here and in
+// raw_ui goes through it, so the dashboard can never be left drawn under a
+// page that is on top of it.
+void setPage(Page p) {
+  g_page = p;
+  const bool settings = (p == Page::Settings);
+
+  if (w.settings) {
+    if (settings) {
+      lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(w.settings);
+    } else {
+      lv_obj_add_flag(w.settings, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (w.kb && !settings) {
+    lv_keyboard_set_textarea(w.kb, nullptr);
+    lv_obj_add_flag(w.kb, LV_OBJ_FLAG_HIDDEN);
+  }
+  // Hidden rather than merely covered: a covered object is still drawn
+  // first, which is the whole cost this avoids.
+  if (w.root) {
+    if (p == Page::Dashboard) {
+      lv_obj_remove_flag(w.root, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+}
+
+Page page() { return g_page; }
+
+bool settingsOpen() { return g_page == Page::Settings; }
 
 }  // namespace ui

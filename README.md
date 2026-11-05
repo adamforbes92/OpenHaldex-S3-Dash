@@ -426,6 +426,7 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
 | `n` | pause / resume the HTTP polling |
 | `e` | ESP-NOW vs HTTP, every field side by side |
+| `x` | open / close the raw telemetry page (all of the above on the glass) |
 | `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
 | `b` | toggle the bounce buffer between 0 and 16 lines |
 | `r` | try the next GT911 axis mapping |
@@ -436,6 +437,15 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 what is on the glass, which is how the layout was verified without a screen in
 front of you. `tools/serial_seq.py "35:d,42:n,48:d,56:n"` drives a whole timed
 scene in one run.
+
+`x` (or **SETTINGS → RAW DATA**) opens the **raw telemetry page**: every value
+the dash can see, on both transports, with a field the C6 marks as "no value"
+drawn as `--` rather than `0`. It is the instrument for a road test — what the
+packet carries versus what the JSON carries, side by side — so a problem can be
+read off the panel or pasted from the console instead of being described.
+
+The page prints itself to the console when it opens and whenever **FREEZE** is
+pressed, which holds the last reading on the glass long enough to photograph.
 
 To stage a **stale** screen, both transports have to be stopped — `E` (stop
 listening) then `n` (stop polling). Either one alone leaves the dashboard live,
@@ -523,6 +533,8 @@ src/
     config.h/.cpp           NVS-backed settings, validation, revision counter
   ui/
     dash_ui.h/.cpp          the whole dashboard in LVGL
+    raw_ui.h/.cpp           raw telemetry page: both transports, no
+                            interpretation, "--" for a field with no value
     fonts/
       font_rpm_96.c         96 px rev digits, generated (tools/make_fonts.sh)
       font_num_56.c         56 px boost value, generated

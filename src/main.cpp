@@ -22,6 +22,7 @@
 #include "net/datafeed.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
+#include "ui/raw_ui.h"
 
 namespace {
 
@@ -221,8 +222,13 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now x=raw page");
         break;
+      case 'x':
+        // The raw telemetry page: every value the dash can see, over both
+        // transports, with absent fields shown as "--".
+        rawui::toggle();
+        continue;
       case 'e':
 #if OHX_USE_ESP_NOW
         ohxnow::printCompare();
@@ -262,6 +268,7 @@ void setup() {
   const bool displayOk = crowpanel::begin();
   if (displayOk) {
     ui::begin();
+    rawui::begin();  // the raw telemetry page, hidden until asked for
   } else {
     // No panel means no display and no touch. Keep running so the serial
     // console stays useful and the network side can still be diagnosed:
@@ -287,6 +294,9 @@ void loop() {
 
   if ((uint32_t)(now - g_lastUiMs) >= kUiPeriodMs) {
     g_lastUiMs = now;
+    // The raw page is refreshed first: while it is up the dashboard tick
+    // returns immediately, so this is the only thing drawing.
+    rawui::tick();
     ui::tick();
   }
 
