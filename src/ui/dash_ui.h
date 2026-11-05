@@ -25,6 +25,20 @@ void showSettings(bool visible);
 /// True while the settings page is open.
 bool settingsOpen();
 
+/// Which page owns the glass. The dashboard is hidden - not merely covered -
+/// while another page is up: LVGL 9 has no "covered by an opaque object"
+/// skip, so anything left visible underneath is redrawn along with whatever
+/// is on top of it. A page that takes the glass must call setPage(), and
+/// hand the glass back with setPage(Page::Dashboard).
+enum class Page : uint8_t {
+  Dashboard,
+  Settings,
+  Raw,  // the raw telemetry page (src/ui/raw_ui.cpp)
+};
+
+void setPage(Page p);
+Page page();
+
 /// Bring-up aid: bit mask selecting which redraw groups stay enabled.
 /// 1 = rev bar, 2 = numbers under the rev bar, 4 = the big rev number,
 /// 8 = tile readouts, 16 = status bar. Clearing a bit stops that group from

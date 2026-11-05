@@ -52,6 +52,18 @@ struct Dash {
   bool tempProtection;
   bool everOk;
   uint32_t ageMs;
+
+  // Raw fields the C6 publishes that the dashboard does not use yet. They
+  // live here rather than being parsed inside the UI so the raw page and the
+  // lamp logic that follows it read the same value from the same place.
+  //
+  // brakeFromCAN / handbrakeFromCAN are the *chassis CAN* view of the pedals
+  // (-1 = the C6 reported null). The wired inputs above them are a different
+  // thing: on this car the wired handbrake input is off while the CAN says
+  // the handbrake is up, which is the working theory for the dark lamps.
+  float steeringAngle;    // deg, NAN when the C6 reports null (Gen1 gating)
+  int brakeFromCAN;       // -1 unknown, else 0/1
+  int handbrakeFromCAN;   // -1 unknown, else 0/1
 };
 
 struct Stats {

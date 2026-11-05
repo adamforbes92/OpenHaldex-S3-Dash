@@ -43,6 +43,13 @@ float numOrNan(JsonVariantConst v) {
 }
 
 int intOrMinus1(JsonVariantConst v) {
+  // The controller mixes the two: counts and states arrive as integers, but
+  // brakeFromCAN / handbrakeFromCAN are declared `bool` in its own headers and
+  // arrive as JSON true/false. Reading a boolean with is<int>() fails, so
+  // every one of those read as "not present" and drew as "--". A value the
+  // controller genuinely has no source for is a JSON null, and -1 is reserved
+  // for that: "no data" and "off" must not look the same.
+  if (v.is<bool>()) return v.as<bool>() ? 1 : 0;
   if (v.is<int>()) return v.as<int>();
   return -1;
 }
@@ -324,6 +331,11 @@ void pollDash() {
     v.awdWarning = doc["awdWarning"] | false;
     v.couplingOpen = doc["couplingOpen"] | false;
     v.tempProtection = doc["tempProtection"] | false;
+    // The CAN view of the pedals, and the steering angle the JSON path
+    // gated off for Gen1. Reported as null by the C6 when unknown.
+    v.brakeFromCAN = intOrMinus1(doc["brakeFromCAN"]);
+    v.handbrakeFromCAN = intOrMinus1(doc["handbrakeFromCAN"]);
+    v.steeringAngle = numOrNan(doc["steeringAngle"]);
     v.everOk = true;
     v.ageMs = 0;
     g_dashOkMs = now;
@@ -398,7 +410,7 @@ void setPaused(bool paused) {
 void begin() {
   g_live = Live{NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, false, UINT32_MAX};
   g_dash = Dash{-1, -1, -1, -1, false, false, false, false, false, false,
-                false, false, false, false, UINT32_MAX};
+                false, false, false, false, UINT32_MAX, NAN, -1, -1};
   g_stats = Stats{};
 
   xTaskCreatePinnedToCore(netTask, "ohxnet", 10240, nullptr, 4, nullptr, 0);
