@@ -43,6 +43,13 @@ float numOrNan(JsonVariantConst v) {
 }
 
 int intOrMinus1(JsonVariantConst v) {
+  // The controller mixes the two: counts and states arrive as integers, but
+  // brakeFromCAN / handbrakeFromCAN are declared `bool` in its own headers and
+  // arrive as JSON true/false. Reading a boolean with is<int>() fails, so
+  // every one of those read as "not present" and drew as "--". A value the
+  // controller genuinely has no source for is a JSON null, and -1 is reserved
+  // for that: "no data" and "off" must not look the same.
+  if (v.is<bool>()) return v.as<bool>() ? 1 : 0;
   if (v.is<int>()) return v.as<int>();
   return -1;
 }
