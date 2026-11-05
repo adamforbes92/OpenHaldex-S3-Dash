@@ -427,6 +427,7 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 | `n` | pause / resume the HTTP polling |
 | `e` | ESP-NOW vs HTTP, every field side by side |
 | `x` | open / close the raw telemetry page (all of the above on the glass) |
+| `v` | force the other tile band, for bench work (see 'What the car can fill') |
 | `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
 | `b` | toggle the bounce buffer between 0 and 16 lines |
 | `r` | try the next GT911 axis mapping |
@@ -452,14 +453,60 @@ listening) then `n` (stop polling). Either one alone leaves the dashboard live,
 which is the point of the fallback; `[stats] source ...` says which one is
 carrying it.
 
-> Opening this board's serial port pulses the auto-reset lines and reboots the
-> ESP32, clearing anything held in RAM. `tools/serial_watch.py` reads the
-> console without resetting, and `tools/serial_shell.py` holds the port open so
-> gestures and console keys can be interleaved with no reset in between.
+> **Opening this board's serial port reboots the ESP32.** That is measured,
+> not assumed: with a 12 s gap between two runs, the second still begins with a
+> full boot banner, so the reset comes from the kernel asserting DTR/RTS as the
+> port is opened, before any userspace code can touch the lines. Nothing held in
+> RAM survives it. `tools/serial_shell.py` therefore opens the port **once** and
+> keeps it, so a whole session of gestures and console keys is not reset halfway
+> through, and `tools/serial_capture.py` is the one to use when a reset is
+> exactly what you want.
 
 ---
 
-## 9. ESP-NOW
+## 9. What the car can fill
+
+The dashboard's shape is decided once at boot from what the controller says it
+can feed, not fixed for every car. Two ways of finding out, and which was used
+is shown on the raw page so it can be argued with:
+
+| | How | Why |
+|---|---|---|
+| **detected** | the packet marks a field it has no value for with a sentinel, which arrives as NaN | the car is telling us, rather than us assuming |
+| **table** | the Haldex generation | boost is the one field with no sentinel: a car with no boost frame reads a confident `0.00`, so it cannot be detected |
+
+Measured on the Gen1 car this was built against, and logged as one line at
+boot:
+
+```
+[cap] gen 1 | boost no (table) | supply no (detected) | haldex temps no
+(detected) | steering yes (detected) | NoBoost (A) | 20 pkts
+```
+
+| Capability | This car | Consequence |
+|---|---|---|
+| boost | absent | the BOOST panel is not built into the band |
+| supply voltage | absent | not shown |
+| Haldex oil / clutch / module temps | absent | not shown |
+| steering angle | **packet only** | the packet is authoritative; the JSON path gates it off for Gen1 |
+| handbrake | **chassis CAN only** | the lamp lights from the CAN bit; the wired input never moves on this car |
+| brake | wire, and CAN | the lamp lights from either |
+
+Two tile bands exist, both approved as mock-ups in `docs/mockups/`:
+
+* **NoBoost (A)** — SPEED | TEMPERATURES | HALDEX, three equal panels (266 / 266
+  / 268), for a car with no boost source. What this car gets.
+* **Full (B)** — SPEED | BOOST | TEMPERATURES | HALDEX, the widths `dash.html`
+  gives them, for a car that has one. **Unverified**: no Gen4/5 car has been
+  available to test it on.
+
+The decision latches. It is not re-evaluated per frame, because a layout that
+changed shape while the car was moving would be worse than a widget that reads
+`--`, and an unsettled dashboard keeps the full band rather than hiding a widget
+on a guess. `v` on the console forces either band, which is how the unverified
+one gets looked at.
+
+## 10. ESP-NOW
 
 The controller broadcasts a packed `OhxStatus` struct to the broadcast address
 every 100 ms with **no web stack involved** — no access-point association, no
@@ -491,7 +538,7 @@ Full plan, risks and phase notes: [`docs/esp-now-plan.md`](docs/esp-now-plan.md)
 
 ---
 
-## 10. What this device cannot show
+## 11. What this device cannot show
 
 Data the controller does not expose, or has no room for here:
 
@@ -506,7 +553,7 @@ Data the controller does not expose, or has no room for here:
 
 ---
 
-## 11. Repository layout
+## 12. Repository layout
 
 ```
 platformio.ini              build: ESP32-S3, OPI PSRAM, 4 MB OTA layout
@@ -563,7 +610,7 @@ build needs neither node nor the script.
 
 ---
 
-## 12. Status
+## 13. Status
 
 Working on the bench against a live controller:
 

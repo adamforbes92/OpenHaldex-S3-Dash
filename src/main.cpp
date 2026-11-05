@@ -21,6 +21,7 @@
 #include "net/ohx_now.h"
 #include "net/datafeed.h"
 #include "app/capability.h"
+#include "version.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
 #include "ui/raw_ui.h"
@@ -68,6 +69,7 @@ void printBanner() {
   Serial.println();
   Serial.println("=========================================");
   Serial.println(" OpenHaldex S3 Dash");
+  Serial.printf(" version  : %s (%s)\n", OHX_DASH_VERSION, OHX_DASH_BUILD);
   Serial.printf(" board    : %s\n", BOARD_NAME);
   Serial.printf(" chip     : %s rev %d, %d core(s) @ %u MHz\n", ESP.getChipModel(),
                 ESP.getChipRevision(), ESP.getChipCores(), getCpuFrequencyMhz());

@@ -1,24 +1,48 @@
 #!/usr/bin/env python3
-"""Read the console WITHOUT resetting the board.
+"""Read the console.
 
-serial_capture.py pulses RTS to hard-reset, which is what you want when you
-are watching a boot but not when the board is holding state you care about
-(the touch probe, for instance). Here DTR/RTS are dropped as the port opens,
-so nothing is pulsed; if the board did reset anyway, the boot banner will be
-the first thing in the output, which is the tell.
+Opening this board's console port reboots it. That is measured, not assumed:
+with a 12 s gap between two runs the second run still begins with a full boot
+banner, so the reset comes from the kernel asserting DTR/RTS as the port is
+opened - before any userspace code can set the lines. HUPCL is cleared and the
+lines are dropped on open, which keeps the *close* from pulsing them as well.
+
+What this tool is for, given that: it opens once and holds the port, so a whole
+session of console keys and gestures is not reset halfway through. Use
+serial_capture.py when a reset is what you want.
 
 usage: serial_watch.py [seconds] [port] [baud]
 """
+import os
 import sys
 import time
 
 import serial
+import termios
 
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 8.0
 port = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
 baud = int(sys.argv[3]) if len(sys.argv) > 3 else 115200
 
+# The board's auto-reset circuit watches DTR/RTS. Clearing HUPCL *before*
+# opening stops the driver asserting those lines on open, which is what makes
+# the difference between reading this board's console and rebooting it.
+def _clear_hupcl(port):
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except (termios.error, OSError):
+        pass
+    finally:
+        os.close(fd)
+
 ser = serial.Serial()
+_clear_hupcl(port)
 ser.port = port
 ser.baudrate = baud
 ser.timeout = 0.2

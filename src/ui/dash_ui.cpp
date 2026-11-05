@@ -33,6 +33,7 @@
 
 #include "hal/crowpanel.h"
 #include "net/telemetry.h"
+#include "net/ohx_now.h"
 #include "net/datafeed.h"
 #include "app/config.h"
 #include "theme.h"
@@ -81,6 +82,9 @@ struct Widgets {
   lv_obj_t *dayLabel = nullptr;
 
   lv_obj_t *settings = nullptr, *kb = nullptr;
+  // What the controller will accept from us, and with what key. Shown in
+  // settings because the credential is a settings field, not a diagnostic.
+  lv_obj_t *ctrlLine = nullptr, *ctrlWarn = nullptr;
 } w;
 
 struct Values {
@@ -821,10 +825,19 @@ void buildSettings() {
 
   g_taSsid = addField(card, y, "SSID", g_edit.ssid, false, 240);
   y += 44;
-  g_taPass = addField(card, y, "PASSWORD", g_edit.pass, true, 240);
+  g_taPass = addField(card, y, "AP PASSWORD", g_edit.pass, true, 240);
   y += 44;
   g_taHost = addField(card, y, "HOST", g_edit.host, false, 240);
   y += 52;
+
+  // The password above is two things at once: the WPA key the station joins
+  // the access point with, and the HMAC key every ESP-NOW command has to be
+  // signed with. Empty is therefore not "no password needed" - it is a key
+  // anyone in range can compute, against a nonce the controller broadcasts.
+  w.ctrlLine = fixedLabel(card, 0, y, 620, 20, FONT_SMALL, COL_DIM, "control: waiting");
+  y += 22;
+  w.ctrlWarn = fixedLabel(card, 0, y, 620, 20, FONT_SMALL, COL_AMBER, "");
+  y += 30;
 
   lv_obj_t *disp = label(card, FONT_BODY, COL_DIM, "DISPLAY");
   lv_obj_set_pos(disp, 0, y);
@@ -1308,8 +1321,35 @@ Timings takeTimings() {
   return t;
 }
 
+// One line about whether the controller would accept a command from this
+// dash, and whether the key it would have to be signed with is set. The
+// credential doubles as the station's join password, so this is the same
+// field the operator just typed.
+void updateControlStatus() {
+  if (!w.ctrlLine) return;
+  const ohxnow::Status s = ohxnow::last();
+  char buf[160];
+  if (!s.valid) {
+    setText(w.ctrlLine, "control: no packet from the controller yet");
+    setTextColor(w.ctrlLine, COL_DIM);
+    setText(w.ctrlWarn, "");
+    return;
+  }
+  snprintf(buf, sizeof buf, "control: %s | signing key: %s",
+           s.ctrlAccept ? "accepted over ESP-NOW" : "refused (off on the controller)",
+           s.keyed ? "set" : "NONE");
+  setText(w.ctrlLine, buf);
+  setTextColor(w.ctrlLine, s.ctrlAccept ? COL_GREEN : COL_AMBER);
+  if (!s.keyed) {
+    setText(w.ctrlWarn, "Open access point: set one, or anyone in range can send commands");
+  } else {
+    setText(w.ctrlWarn, "");
+  }
+}
+
 void showSettings(bool visible) {
   if (visible) {
+    updateControlStatus();
     g_edit = cfg::get();
     lv_textarea_set_text(g_taSsid, g_edit.ssid);
     lv_textarea_set_text(g_taPass, g_edit.pass);

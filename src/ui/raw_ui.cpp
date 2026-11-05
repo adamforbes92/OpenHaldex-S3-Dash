@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "app/capability.h"
+#include "version.h"
 #include "app/config.h"
 #include "net/datafeed.h"
 #include "net/ohx_now.h"
@@ -352,7 +353,7 @@ void buildPage() {
   lv_obj_set_style_radius(g_root, 0, 0);
   lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);
 
-  mkLabel(g_root, 8, 6, 200, 24, FONT_BODY, COL_AMBER, "RAW TELEMETRY");
+  mkLabel(g_root, 8, 6, 300, 24, FONT_BODY, COL_AMBER, "RAW TELEMETRY " OHX_DASH_VERSION);
   g_title = mkLabel(g_root, 210, 10, 420, 18, FONT_CAP, COL_DIM, "waiting for data");
   // FREEZE holds the last reading on the glass so a moving value can be
   // photographed instead of guessed at.
