@@ -545,6 +545,12 @@ void printCompare() {
   row("clutch", s.clutchTemp, NAN, "C  (ESP-NOW only)");
   row("module", s.moduleTemp, NAN, "C  (ESP-NOW only)");
   row("supply", s.supplyV, NAN, "V  (ESP-NOW only)");
+  // The one field the two transports disagree about on purpose, and the only
+  // reason this row exists: /api/dashboard gates steeringAngle on the Haldex
+  // generation (2/4/50/52) while the packet carries it for any car whose
+  // chassis bus sends LW_1 / LWI_01 - which includes Gen1. Printing them side
+  // by side is how that gets reported rather than argued about.
+  row("steering", s.steering, d.steeringAngle, "deg  (HTTP null on Gen1)");
   Serial.printf("  %-11s %10u   %10d   mode\n", "mode", (unsigned)s.mode, (int)d.mode);
   Serial.printf("  %-11s %10u   %10d   haldexState\n", "haldexState", (unsigned)s.haldexState,
                 (int)d.haldexState);

@@ -195,9 +195,18 @@ fastest way to explore it if anyone wants more.
 ### 4.4 Report upstream: the steering inconsistency
 `/api/dashboard` gates `steeringAngle` on `steerSupported = (gen == 2 || 4 ||
 50 || 52)`, so on Gen1 the JSON field is `null` — while the ESP-NOW packet
-carries `steering` for the same car. One of the two is wrong. The dash uses the
-packet, and the raw page shows both side by side, but Forbes Automotive should
-hear about it.
+carries the same `received_steering_angle` for the same car, and so does the
+BLE characteristic. The CAN decoder supports PQ `LW_1` (0x0C2) *and* MQB
+`LWI_01`, so the platform is deliberately supported one layer down and then
+excluded at the API. It shows in the controller's own web UI too
+(`data/app.js` renders `steeringAngle`), and `steeringHealthy` is `false` on
+Gen1, so a client that trusts the health flag is misinformed rather than
+merely uninformed.
+
+The dash uses the packet and is unaffected; the raw page and `e` on the
+console show both transports side by side. The evidence, the three-path
+comparison and a suggested fix are written up ready to paste in
+[`docs/upstream-steering-report.md`](docs/upstream-steering-report.md).
 
 ### 4.5 `ohx_proto.h` must be refreshed from upstream
 It is a verbatim copy of the controller's shared header. If the C6's struct
