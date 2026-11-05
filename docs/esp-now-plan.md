@@ -114,12 +114,19 @@ Nothing changes on screen; HTTP stays the source of truth.
     fps, `ms/wait` and stability.
 13. Point the UI's stale detection at the ESP-NOW packet age.
 
-### Phase 3 — optional, later: commands from the dash
+### Phase 3 — commands from the dash (the mode switch, done)
 14. Mode changes from the touchscreen: build the 22-byte `OhxCommand` with the
     nonce from the newest status packet and the 8-byte HMAC. Note the key is
     the AP password — which is empty by default, so with the default setup the
     signature is over an empty key. Worth deciding deliberately.
 15. Add the buttons to the settings page only after read-only is solid.
+
+**As built**: see §9 below. It is a tap on the HALDEX panel that steps the
+mode, not a settings-page button — one gesture, no list, no confirmation.
+Decision 14's open question was answered by leaving the empty key as a
+*warning* on the settings page rather than a gate: the controller accepts
+commands signed with an empty key, so refusing to send would have removed a
+working feature from exactly the cars that have it working.
 
 ## 5. Risks and how they are handled
 
@@ -280,3 +287,63 @@ So the next performance lever is the render cost or the frame period, not the
 HTTP traffic — and the `p` / `b` console commands are still the fastest way to
 measure it. That is deliberately left alone for now: the instruction was to
 keep the pixel clock where it is known to be stable.
+
+---
+
+## 9. Phase 3 as built (the mode switch)
+
+The dash now transmits exactly one thing: `OHX_C_MODE`.
+
+| Piece | Where |
+|---|---|
+| Build, sign and send the 22-byte command | `ohxnow::sendMode()` in `src/net/ohx_now.cpp` |
+| The nonce it signs against, and the address it unicasts to | the two fields of the newest accepted status packet (`g_lastNonce`, `g_lastSender`) |
+| Recognising the answer as ours | `ackSrc` is the sender's MAC bytes 4–5, `ackSeq` is the seq we sent: both are checked before an ack is believed |
+| The tap-to-step state machine and the panel's line | `cycleMode()` / `updateModeCmd()` in `src/ui/dash_ui.cpp` |
+
+The same wire path, field by field:
+
+```
+UI tap  ->  OhxCommand { magic 'OH','OH', type 2, proto 1,
+                         nonce = newest status nonce,
+                         seq   = ++ourCounter,
+                         cmd   = OHX_C_MODE, arg[0] = 0..5 }
+        ->  HMAC-SHA256(key = AP password) over everything before hmac
+        ->  first 8 bytes into c.hmac
+        ->  esp_now_send() unicast to the controller's MAC
+
+...  <=  next OHX_STATUS broadcast carries ackSrc / ackSeq / ackResult
+```
+
+Two details that make it robust, and neither is optional:
+
+* **The nonce rotates after every accepted command.** Two gauges, or a gauge
+  and the web UI, can therefore race: the loser gets `OHX_R_STALE`. The dash
+  retries exactly once, silently, because the packet refills the nonce every
+  100 ms and a second race is not worth a second retry.
+* **The answer arrives on the broadcast, not as a reply.** There is no
+  unicast ack to wait for, so the UI's "sent / ok / refused" line is driven
+  entirely by the 10 Hz status stream. Latency measured: ~60 ms from
+  `esp_now_send` to the ack being visible, which is under one packet plus one
+  render.
+
+### Verified in the car
+
+```
+[ui] mode -> FWD (sent)
+[ui] mode FWD: ok (ack after 60 ms)
+[ui] mode -> 50:50 (sent)
+[ui] mode 50:50: ok (ack after 58 ms)
+[stats] touch 6 pts, 2 edges, read<= 5.37 ms, x 561..561 y 281..281
+```
+
+The first pair is a finger on the HALDEX panel (the touch line puts the point
+inside it); the second is `m` on the console. Both modes were accepted, which
+also confirms the nonce bookkeeping end to end: two commands in a row, each
+signed with a nonce that had rotated since the previous one.
+
+This controller had **no access-point password**, i.e. `OHX_F2_KEY` clear and
+the HMAC keyed with an empty string — the case the settings page warns about.
+It is a warning on purpose. Whether a command is obeyed is the controller's
+decision and the result code reports it honestly; refusing to send would have
+disabled the feature on exactly the cars where it works.

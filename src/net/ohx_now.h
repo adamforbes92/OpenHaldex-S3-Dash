@@ -1,12 +1,16 @@
 #pragma once
 // =====================================================================
-// ESP-NOW listener for the OpenHaldex-C6's OHX_STATUS broadcast.
+// ESP-NOW link to the OpenHaldex-C6: the OHX_STATUS broadcast, and the
+// commands that go the other way.
 //
-// Phase 1 is LISTEN ONLY. This file receives and decodes; it does not feed
-// the dashboard yet. That keeps the HTTP link as the single source of truth
-// while the wire format, the scaling of each field and the timing are
-// checked against real data, and it means a mistake here cannot make the
-// screen wrong - only the console.
+// In: the controller broadcasts a packed status packet every 100 ms. This
+// decodes it, and datafeed.cpp prefers it over HTTP while packets are
+// arriving.
+//
+// Out: exactly one thing is transmitted - a signed mode command (sendMode),
+// raised by tapping the HALDEX panel. The controller answers in the ack
+// fields of its next broadcast, never directly, so lastAck() reports the
+// result of the last command this dash sent.
 //
 // The contract itself (magic, types, sentinels, flags, struct layout) lives
 // in include/ohx_proto.h, a verbatim copy of the C6's shared header. See
@@ -62,6 +66,11 @@ struct Status {
   bool asrOff = false;
 
   char name[25] = {};
+
+  // The controller's answer to the last command anyone sent it. It does not
+  // reply over the air: it publishes the result in its next broadcast status,
+  // which is why these arrive on the same 10 Hz stream as everything else.
+  uint8_t ackSrc[2] = {}, ackSeq = 0, ackResult = 0;
 };
 
 /// Initialise ESP-NOW. Returns false if WiFi is not up yet - poll() retries.
@@ -81,6 +90,26 @@ Stats stats();
 
 /// Last accepted packet (valid = false until one arrives).
 Status last();
+
+/// Result of the last command *this* dash sent, taken from the ack fields of
+/// the controller's next status packet. valid = the controller has answered
+/// something we sent; ageMs = how long ago.
+struct Ack {
+  bool valid;
+  uint8_t result;  // ohxResult_t
+  uint8_t seq;     // the seq we sent
+  uint32_t ageMs;
+};
+Ack lastAck();
+
+/// Ask the controller to change mode (ohxCmd_t OHX_C_MODE): 0 Stock, 1 FWD,
+/// 2 50:50, 3 60:40, 4 75:25, 5 Expert. Returns false if ESP-NOW is not up,
+/// or the controller has not been heard from yet (its nonce is part of the
+/// signature, so there is nothing to sign against until it speaks).
+///
+/// Not thread-safe with begin()/setEnabled(): call it from the UI task, as
+/// the dashboard does.
+bool sendMode(uint8_t mode);
 
 /// Dump the last accepted packet: header, flags that are set, every value.
 void printLast();

@@ -37,6 +37,7 @@
 #include "net/datafeed.h"
 #include "app/config.h"
 #include "theme.h"
+#include "ohx_proto.h"
 #include "ui/raw_ui.h"
 
 namespace ui {
@@ -49,6 +50,84 @@ constexpr float kTau = 0.11f;  // interpolation time constant, as in dash.html
 constexpr uint32_t kFlashMs = 60;
 
 const char *const kModeNames[6] = {"STOCK", "FWD", "50:50", "60:40", "75:25", "EXPERT"};
+
+// ------------------------------------------------------ mode switch state
+// Tap the HALDEX panel to step the mode on. One tap, one step, no list and no
+// modal: the panel already shows the mode, so the tap's effect is visible in
+// the next packet. The request goes out over ESP-NOW and the controller
+// answers in the ack fields of its next status broadcast - it never replies
+// directly - so this small state machine is what turns that into a line on
+// the panel.
+//
+// The open-access-point warning in settings is a warning, not a gate. An
+// empty password is still a key (the HMAC is computed over an empty string),
+// and whether a command is obeyed is the controller's decision, reported
+// honestly here as a result code.
+constexpr uint32_t kAckWaitMs = 1500;     // sent, no answer: stop waiting
+constexpr uint32_t kResultHoldMs = 5000;  // how long the answer stays up
+constexpr uint8_t kAckNoLink = 0xFE;      // ours, not a car result: not even sent
+constexpr uint8_t kAckNoReply = 0xFF;     // ours: sent, never answered
+
+struct ModeCmd {
+  bool pending = false;     // sent, waiting for the controller's ack
+  bool haveResult = false;  // an answer (or our own failure) is on screen
+  bool retried = false;     // the one silent retry a STALE result earns
+  uint8_t want = 0;         // the mode we asked for
+  uint8_t result = 0;       // ohxResult_t, or kAckNoLink / kAckNoReply
+  uint32_t sentMs = 0, resultMs = 0;
+};
+ModeCmd g_modeCmd;
+int g_curMode = -1;  // the mode the panel is showing, for the next step
+
+const char *ackResultText(uint8_t r) {
+  switch (r) {
+    case OHX_R_OK: return "ok";
+    case OHX_R_STALE: return "stale";
+    case OHX_R_AUTH: return "wrong key";
+    case OHX_R_DISABLED: return "disabled";
+    case OHX_R_MOVING: return "car moving";
+    case OHX_R_NO_HALDEX: return "no haldex";
+    case OHX_R_BUSY: return "busy";
+    case OHX_R_INVALID: return "invalid";
+    case OHX_R_UNSUPPORTED: return "unsupported";
+    case OHX_R_CTRL_OFF: return "control off";
+    case kAckNoLink: return "no link";
+    case kAckNoReply: return "no reply";
+    default: return "?";
+  }
+}
+
+// One step: STOCK -> FWD -> 50:50 -> 60:40 -> 75:25 -> EXPERT -> STOCK. While
+// a command is still in flight the step counts from the mode we just asked
+// for, so three quick taps move three modes instead of re-sending one.
+void cycleMode() {
+  const int base = g_modeCmd.pending
+                       ? g_modeCmd.want
+                       : (g_curMode >= 0 && g_curMode < 6 ? g_curMode : 0);
+  const uint8_t want = (uint8_t)((base + 1) % 6);
+
+  ModeCmd &m = g_modeCmd;
+  m.want = want;
+  m.sentMs = millis();
+  m.pending = true;
+  m.haveResult = false;
+  m.retried = false;
+  m.result = 0;
+
+  if (ohxnow::sendMode(want)) {
+    Serial.printf("[ui] mode -> %s (sent)\n", kModeNames[want]);
+  } else {
+    // Nothing to sign against, or the radio refused: say so on the panel
+    // rather than looking like a tap that did nothing.
+    m.pending = false;
+    m.haveResult = true;
+    m.result = kAckNoLink;
+    m.resultMs = millis();
+    Serial.printf("[ui] mode -> %s: no link to the controller\n", kModeNames[want]);
+  }
+}
+
+void onHaldexTap(lv_event_t *) { cycleMode(); }
 
 // ------------------------------------------------------------- handles
 struct Widgets {
@@ -1062,10 +1141,14 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
   // ---- haldex
   if (d.mode >= 0 && d.mode < 6) {
     setText(w.modeVal, kModeNames[d.mode]);
+    g_curMode = d.mode;  // where the next tap steps from
   } else {
     setText(w.modeVal, "--");
   }
 
+  // Dim is the resting colour: a mode command borrows this line (see
+  // updateModeCmd) and dimming here is what hands it back afterwards.
+  setTextColor(w.haldexSub, COL_DIM);
   if (d.haldexCAN) {
     const char *state = d.couplingOpen ? "coupling open" : "coupling closed";
     setText(w.haldexSub, d.tempProtection ? "temp protection" : state);
@@ -1112,6 +1195,64 @@ void updateReadouts(const cfg::Data &c, const telemetry::Live &live, const telem
   lampState(w.lampTc, d.tcOn, false);
   lampState(w.lampAsr, d.asrOn, false);
   lampState(w.lampAwd, d.awdWarning, true);
+}
+
+// The line under the mode on the HALDEX panel: normally the coupling state,
+// which updateReadouts has just written. While a mode command is in flight -
+// and for a few seconds after it lands - this writes over it with the request
+// and then the controller's answer, so a tap is never silent. Called after
+// updateReadouts so its answer is the one left on the panel.
+void updateModeCmd(uint32_t now) {
+  if (!w.haldexSub) return;
+  ModeCmd &m = g_modeCmd;
+  const char *mode = kModeNames[m.want];
+
+  if (m.pending) {
+    const ohxnow::Ack a = ohxnow::lastAck();
+    if (a.valid && a.result != OHX_R_NONE) {
+      // STALE means another command (the web UI, a second gauge) got in first
+      // and used the nonce up. The packet refills it every 100 ms, so one
+      // silent retry is usually enough; more than one would just race again.
+      if (a.result == OHX_R_STALE && !m.retried) {
+        m.retried = true;
+        if (ohxnow::sendMode(m.want)) {
+          m.sentMs = now;
+          return;
+        }
+      }
+      m.pending = false;
+      m.haveResult = true;
+      m.result = a.result;
+      m.resultMs = now;
+      Serial.printf("[ui] mode %s: %s (ack after %lu ms)\n", mode, ackResultText(a.result),
+                    (unsigned long)a.ageMs);
+    } else if ((uint32_t)(now - m.sentMs) > kAckWaitMs) {
+      m.pending = false;
+      m.haveResult = true;
+      m.result = kAckNoReply;
+      m.resultMs = now;
+      Serial.printf("[ui] mode %s: no reply\n", mode);
+    } else {
+      char buf[24];
+      snprintf(buf, sizeof buf, "%s ...", mode);
+      setText(w.haldexSub, buf);
+      setTextColor(w.haldexSub, COL_AMBER);
+      return;
+    }
+  }
+
+  if (m.haveResult) {
+    if ((uint32_t)(now - m.resultMs) > kResultHoldMs) {
+      m.haveResult = false;  // the readout pass owns the line again
+      return;
+    }
+    char buf[32];
+    snprintf(buf, sizeof buf, "%s %s", mode, ackResultText(m.result));
+    setText(w.haldexSub, buf);
+    setTextColor(w.haldexSub, m.result == OHX_R_OK           ? COL_GREEN
+                             : m.result == kAckNoLink || m.result == kAckNoReply ? COL_RED
+                                                                                : COL_AMBER);
+  }
 }
 
 void updateConn(bool stale) {
@@ -1170,6 +1311,15 @@ void begin() {
   // as a target in a moving car. The rev bar is inside it.
   lv_obj_add_flag(w.top, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(w.top, onLongPress, LV_EVENT_LONG_PRESSED, nullptr);
+
+  // Tap anywhere on the HALDEX panel to step the mode. A plain tap on
+  // purpose: no confirm, because the panel shows the mode and the controller's
+  // answer, so a stray tap is visible and one tap reverses it. The panel is
+  // the target, so a tap that lands on any of its labels still counts.
+  if (g_tileHaldex) {
+    lv_obj_add_flag(g_tileHaldex, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_tileHaldex, onHaldexTap, LV_EVENT_CLICKED, nullptr);
+  }
 
   g_edit = cfg::get();
   buildSettings();
@@ -1287,9 +1437,10 @@ void tick() {
   // The tiles carry values that only arrive at 10 Hz and are already eased,
   // so repainting them 30 times a second buys nothing.
   static uint32_t lastReadouts = 0;
-  if (dbg(8) && (uint32_t)(now - lastReadouts) >= 100) {
+  if ((uint32_t)(now - lastReadouts) >= 100) {
     lastReadouts = now;
-    updateReadouts(c, l, d);
+    if (dbg(8)) updateReadouts(c, l, d);
+    updateModeCmd(now);  // after the coupling line, so its answer wins
   }
   uint32_t t2 = micros();
   if (dbg(16)) updateConn(stale);
@@ -1398,6 +1549,8 @@ Page page() { return g_page; }
 void applyLayout(layout::Variant v) { placeBand(v); }
 
 layout::Variant layoutVariant() { return g_variant; }
+
+void cycleHaldexMode() { cycleMode(); }
 
 bool settingsOpen() { return g_page == Page::Settings; }
 

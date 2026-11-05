@@ -51,7 +51,7 @@ from upstream; never edit it.
 | Band | Contents |
 |---|---|
 | Rev bar | One segmented bar across the full 800 px, `1`–`7` above it and `x1000` at the right, then the rpm as a large centred number on its own row |
-| Tiles | `SPEED` (km/h + peak) · `BOOST` (value, unit, a bar, peak) · `TEMPERATURES` (coolant and oil, each with a bar) · `HALDEX` (mode, coupling state, lock requested / actual, throttle) |
+| Tiles | `SPEED` (km/h + peak) · `BOOST` (value, unit, a bar, peak) · `TEMPERATURES` (coolant and oil, each with a bar) · `HALDEX` (mode, coupling state, lock requested / actual, throttle) — **tap it to step the Haldex mode** |
 | Status bar | Data-state dot, the BRAKE / HAND / TC / ASR / AWD lamps, rpm peak, and the RESET PEAKS / DAY / SETTINGS buttons |
 
 The tile band follows the same geometry as the browser page, from one unit:
@@ -306,7 +306,9 @@ partition:
 | coredump | data/coredump | 0x3f0000 | 0x10000 |
 
 OTA matters once the dash is mounted behind the dashboard, where there is no
-USB cable.
+USB cable. It is deliberately **after** the mode switch: a dash that can
+change one thing on the car is worth more than one that can be reflashed, and
+the flashing side of OTA needs no new partition to be useful.
 
 ---
 
@@ -428,6 +430,7 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 | `e` | ESP-NOW vs HTTP, every field side by side |
 | `x` | open / close the raw telemetry page (all of the above on the glass) |
 | `v` | force the other tile band, for bench work (see 'What the car can fill') |
+| `m` | step the Haldex mode — the same as tapping the HALDEX panel |
 | `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
 | `b` | toggle the bounce buffer between 0 and 16 lines |
 | `r` | try the next GT911 axis mapping |
@@ -534,6 +537,54 @@ field by field, so any field whose scaling differs — `boost` is the one to
 watch, since the packet documents it as "mbar above ambient" — is visible
 rather than guessed at.
 
+### Sending: the mode switch
+
+The same wire format carries the other way. **Tap anywhere on the HALDEX
+panel** and the mode steps on: Stock → FWD → 50:50 → 60:40 → 75:25 → Expert →
+Stock. One tap, one step — no list, no confirmation, no modal. `m` on the
+console does exactly the same thing, which is how the path gets exercised
+without touching the glass.
+
+The command is 22 bytes — magic, type, proto, the controller's nonce, a
+per-dash sequence, the command byte and its arguments — signed with
+**HMAC-SHA256**, truncated to 8 bytes. The key is the controller's
+access-point password: the same string the station joins with. It is unicast
+to the MAC the last status packet came from, and this is the only thing this
+firmware ever transmits.
+
+The controller does not reply directly. It publishes the answer in the ack
+fields of its next broadcast (`ackSrc`, `ackSeq`, `ackResult`), so the
+verdict arrives with the same 10 Hz stream as the data, and the panel's
+sub-line reports both halves of the exchange:
+
+```
+[ui] mode -> FWD (sent)
+[ui] mode FWD: ok (ack after 60 ms)
+```
+
+| On the panel | Meaning |
+|---|---|
+| `FWD ...` | sent, waiting for the controller |
+| `FWD ok` | accepted and applied |
+| `FWD control off` | ESP-NOW commands are switched off on the controller |
+| `FWD wrong key` | the password here differs from the one on the controller |
+| `FWD no link` | nothing was sent: no packet heard from the controller yet |
+| `FWD no reply` | sent, but nothing came back within 1.5 s |
+
+A `stale` result (another command — the web UI, a second gauge — used the
+nonce first) earns **one** silent retry, because the nonce is refilled every
+100 ms and a second race would just lose the same way.
+
+**An open access point is a warning, not a gate.** With no password the HMAC
+is keyed with an empty string, and the controller accepts commands signed that
+way if it has commands enabled — this is the state the reference car was in
+when the table above was captured. Settings says so in plain words (`signing
+key: NONE` plus a warning line) and leaves the switch working, because whether
+a command is obeyed is the controller's decision and the result code reports
+it honestly. The nonce is broadcast, so on an open access point anyone in
+range can compute a signature; the visible, immediate mode change on the panel
+is what makes that noticeable.
+
 Full plan, risks and phase notes: [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
 
 ---
@@ -612,7 +663,7 @@ build needs neither node nor the script.
 
 ## 13. Status
 
-Working on the bench against a live controller:
+Working on the bench against a live controller, and now verified in the car:
 
 * Panel, touch and the PCA9557 expander all come up; tearing and jitter are
   dealt with (two frame buffers, DIRECT mode, push only on
@@ -621,17 +672,25 @@ Working on the bench against a live controller:
   with the source printed and switchable.
 * Stale behaviour, the settings page, the touch mapping and all five redraw
   groups have been measured on the bench.
+* **In the car**: the raw telemetry page renders and every field matches what
+  the controller reports; the BRAKE and HAND lamps light from the source that
+  actually moves on this car; the capability decision settles to the NoBoost
+  band; and **the mode switch works** — a tap on the HALDEX panel, and `m` on
+  the console, each got `ok` back from the controller in ~60 ms.
 
-**Not yet done: testing in the car.** The value scaling — rpm, speed, boost,
-throttle and the temperatures — has only been exercised against bench data.
-`boost` is the field most likely to disagree, since it is documented as mbar
-above ambient.
+**Still to be exercised in the car:** the value scaling for `boost` — none of
+the reference car's data has come from a boost source yet, since a Gen1 Haldex
+has no boost frame at all, and the Full band itself remains unverified.
+
+Order of work from here: the mode switch (done) came **before OTA**, because a
+mounted dash that can change one thing on the car is worth more than one that
+can be reflashed.
 
 Build result:
 
 ```
-RAM:   153 492 / 327 680 B   (46.8%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 618 742 / 1 966 080 B (82.3%) <- of the 1.875 MB OTA slot
+RAM:   154 004 / 327 680 B   (47.0%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 633 518 / 1 966 080 B (83.1%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly
