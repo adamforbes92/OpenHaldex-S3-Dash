@@ -839,7 +839,11 @@ void onCfgSave(lv_event_t *) {
   strncpy(g_edit.ssid, lv_textarea_get_text(g_taSsid), sizeof(g_edit.ssid) - 1);
   strncpy(g_edit.pass, lv_textarea_get_text(g_taPass), sizeof(g_edit.pass) - 1);
   strncpy(g_edit.host, lv_textarea_get_text(g_taHost), sizeof(g_edit.host) - 1);
+  // A new SSID means a different controller, so the remembered one is dropped.
+  // A new password on the same SSID is still the same controller.
+  const bool ssidChanged = strcmp(g_edit.ssid, cfg::get().ssid) != 0;
   cfg::apply(g_edit);
+  if (ssidChanged) ohxnow::forgetController();
   crowpanel::setBacklight((uint8_t)lroundf(cfg::get().brightness));
   syncGauge();  // the zones and the numbers move with the scale
   showSettings(false);
@@ -854,6 +858,7 @@ void onCfgDefaults(lv_event_t *) {
   fresh.port = keep.port;
   fresh.netUseStatic = keep.netUseStatic;  // learnt on this car, not a preference
   cfg::apply(fresh);
+  ohxnow::forgetController();  // also how a replaced controller gets picked up
   g_edit = cfg::get();
   lv_textarea_set_text(g_taSsid, g_edit.ssid);
   lv_textarea_set_text(g_taPass, g_edit.pass);

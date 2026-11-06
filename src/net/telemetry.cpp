@@ -15,6 +15,7 @@
 
 #include "app/config.h"
 #include "app/ota.h"
+#include "net/ohx_now.h"
 
 namespace telemetry {
 namespace {
@@ -108,7 +109,29 @@ bool wifiEnsureConnected() {
   const uint32_t rev = cfg::revision();
   const bool revisionChanged = (rev != lastRevision);
 
-  if (wifiLinkUp() && !revisionChanged) return true;
+  // Joined the right access point? Two cars can share the default SSID, and the
+  // HTTP values must come from the same controller as the ESP-NOW ones. Checked
+  // once a second, because this runs every 2 ms.
+  static uint32_t lastApCheck = 0;
+  static bool onWrongAp = false;
+  if (!revisionChanged && wifiLinkUp()) {
+    if ((uint32_t)(millis() - lastApCheck) >= 1000) {
+      lastApCheck = millis();
+      uint8_t joined[6];
+      uint8_t ours[6];
+      if (WiFi.BSSID(joined) != nullptr) {
+        if (!ohxnow::controller(ours)) {
+          ohxnow::setController(joined);  // nothing heard yet: the AP we joined is it
+          onWrongAp = false;
+        } else {
+          onWrongAp = memcmp(joined, ours, 6) != 0;
+          if (onWrongAp) Serial.println("[net] joined another controller's AP - rejoining ours");
+        }
+      }
+    }
+    if (!onWrongAp) return true;
+  }
+  onWrongAp = false;
 
   const uint32_t now = millis();
   // A bounced access point should be back within a couple of seconds. The
@@ -160,8 +183,13 @@ bool wifiEnsureConnected() {
     staticInUse = false;
   }
 
-  Serial.printf("[net] joining \"%s\" (password %s)\n", ssid, pass[0] ? "set" : "empty");
-  WiFi.begin(ssid, pass[0] ? pass : nullptr);
+  // Aimed at our controller's own MAC when we know it, so a stronger access
+  // point with the same SSID in the next parking space cannot pull us away.
+  uint8_t ours[6];
+  const uint8_t *bssid = ohxnow::controller(ours) ? ours : nullptr;
+  Serial.printf("[net] joining \"%s\" (password %s%s)\n", ssid, pass[0] ? "set" : "empty",
+                bssid ? ", our controller only" : "");
+  WiFi.begin(ssid, pass[0] ? pass : nullptr, 0, bssid);
 
   bool up = waitForJoin(preferStatic ? 8000 : 15000);
 
@@ -180,7 +208,7 @@ bool wifiEnsureConnected() {
         staticInUse = true;
         WiFi.disconnect();
         delay(100);
-        WiFi.begin(ssid, pass[0] ? pass : nullptr);
+        WiFi.begin(ssid, pass[0] ? pass : nullptr, 0, bssid);
         up = waitForJoin(8000);
         if (up && !preferStatic) {
           cfg::Data d = cfg::get();

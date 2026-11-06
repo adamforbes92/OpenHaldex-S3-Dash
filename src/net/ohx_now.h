@@ -28,6 +28,7 @@ struct Stats {
   uint32_t duplicates;  // same seq as the previous packet from that sender
   uint32_t gaps;        // seq jumped by more than one: something was missed
   uint32_t senders;     // distinct source MACs heard
+  uint32_t ignored;     // packets from a controller that is not ours
   float hz;             // accepted packets per second over the last second
   uint32_t ageMs;       // since the last accepted packet (UINT32_MAX = never)
   int16_t rssi;         // of the last accepted packet
@@ -72,6 +73,23 @@ struct Status {
   // which is why these arrive on the same 10 Hz stream as everything else.
   uint8_t ackSrc[2] = {}, ackSeq = 0, ackResult = 0;
 };
+
+/// Load the remembered controller from NVS. Call once from setup(), before the
+/// network task starts, so its first join is already aimed at the right car.
+void loadController();
+
+/// The controller this dash follows: true and its MAC if one has been chosen.
+/// Safe from any task.
+bool controller(uint8_t mac[6]);
+
+/// Follow this controller from now on. The network task uses it when it joins
+/// an access point before any packet has been heard. Saved by poll().
+void setController(const uint8_t mac[6]);
+
+/// Stop following it, so the next controller heard with our SSID is taken
+/// instead. How a replaced controller gets picked up: changing the SSID, the
+/// DEFAULTS button, or 'f' on the console. Saved by poll().
+void forgetController();
 
 /// Initialise ESP-NOW. Returns false if WiFi is not up yet - poll() retries.
 bool begin();

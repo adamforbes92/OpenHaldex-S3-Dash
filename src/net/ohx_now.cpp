@@ -17,9 +17,11 @@
 #include "app/config.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "net/telemetry.h"
@@ -54,7 +56,24 @@ volatile uint32_t g_ackMs = 0;
 uint32_t g_lastStatusMs = 0;        // when the nonce we would sign against arrived
 uint32_t g_lastNonce = 0;
 volatile bool g_lastCtrlAccept = false;
-uint8_t g_lastSender[6] = {};
+
+// ---- which controller is ours. A broadcast reaches every dash in range, so at
+// a car meet two controllers can be on the air at once, both called
+// "OpenHaldex-C6" if neither owner renamed it. The numbers on the glass and a
+// tap on the HALDEX panel must both belong to this car, so the first controller
+// whose name matches our SSID is remembered by its MAC, in NVS, and everyone
+// else is ignored. Guarded by g_mux.
+constexpr const char *kPrefsNamespace = "ohxdash";
+constexpr const char *kPrefsCtrlKey = "ctrlMac";
+uint8_t g_ctrlMac[6] = {};
+bool g_ctrlKnown = false;
+volatile bool g_ctrlDirty = false;  // changed: poll() saves it, never the WiFi task
+
+// The last other controller heard, so poll() can mention it once per MAC.
+uint8_t g_otherMac[6] = {};
+char g_otherName[25] = {};
+volatile bool g_otherNew = false;
+
 uint32_t g_lastSeqFrom[4] = {0};    // per-sender: seq of the previous packet
 uint8_t g_senderMac[4][6] = {};
 int g_senderCount = 0;
@@ -163,7 +182,6 @@ void decode(const uint8_t *p, size_t len, const uint8_t *src, int16_t rssi, uint
   g_lastNonce = out.nonce;
   g_lastStatusMs = millis();
   g_lastCtrlAccept = out.ctrlAccept;
-  memcpy(g_lastSender, out.src, 6);
 
   if (g_cmdSeq != 0 && out.ackSeq == g_cmdSeq && out.ackSrc[0] == g_ownMac[4] &&
       out.ackSrc[1] == g_ownMac[5]) {
@@ -192,11 +210,35 @@ void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   const int8_t rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
   const uint8_t ch = info->rx_ctrl ? (uint8_t)info->rx_ctrl->channel : 0;
 
+  // Is this our controller? This comes before decode(), which latches the nonce
+  // a command gets signed with: another car's packet must not touch any of it.
+  // The packet's name is its AP SSID, cut to 23 characters by the sender.
+  const char *name = (const char *)data + offsetof(OhxStatus, name);
+  taskENTER_CRITICAL(&g_mux);
+  const int slot = senderSlot(info->src_addr);
+  g_stats.senders = (uint32_t)g_senderCount;
+  if (!g_ctrlKnown && strncmp(name, cfg::get().ssid, 23) == 0) {
+    memcpy(g_ctrlMac, info->src_addr, 6);
+    g_ctrlKnown = true;
+    g_ctrlDirty = true;
+  }
+  if (!g_ctrlKnown || memcmp(g_ctrlMac, info->src_addr, 6) != 0) {
+    g_stats.ignored++;
+    if (memcmp(g_otherMac, info->src_addr, 6) != 0) {
+      memcpy(g_otherMac, info->src_addr, 6);
+      memcpy(g_otherName, name, 24);
+      g_otherName[24] = '\0';
+      g_otherNew = true;
+    }
+    taskEXIT_CRITICAL(&g_mux);
+    return;
+  }
+  taskEXIT_CRITICAL(&g_mux);
+
   Status s;
   decode(data, (size_t)len, info->src_addr, rssi, ch, s);
 
   taskENTER_CRITICAL(&g_mux);
-  const int slot = senderSlot(info->src_addr);
   // seq is a uint8 counter with wraparound, so compare with (uint8_t)(a-b).
   const uint32_t prev = g_lastSeqFrom[slot];
   if (g_stats.packets > 0 && (uint8_t)(s.seq - (uint8_t)prev) == 0) {
@@ -208,7 +250,6 @@ void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 
   g_status = s;
   g_stats.packets++;
-  g_stats.senders = (uint32_t)g_senderCount;
   g_stats.rssi = (int16_t)rssi;
   g_stats.channel = ch;
   memcpy(g_stats.src, info->src_addr, 6);
@@ -297,7 +338,70 @@ const char *fstr(float v) {
   return b;
 }
 
+// Write the remembered controller to NVS, or remove it if it was forgotten.
+// Flash work, so this runs from poll() on the main loop and never from the WiFi
+// task's receive callback.
+void saveController() {
+  uint8_t mac[6];
+  taskENTER_CRITICAL(&g_mux);
+  const bool known = g_ctrlKnown;
+  memcpy(mac, g_ctrlMac, 6);
+  taskEXIT_CRITICAL(&g_mux);
+
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNamespace, false)) return;
+  if (known) {
+    prefs.putBytes(kPrefsCtrlKey, mac, 6);
+    Serial.printf("[now] following controller %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1],
+                  mac[2], mac[3], mac[4], mac[5]);
+  } else {
+    prefs.remove(kPrefsCtrlKey);
+    Serial.println("[now] controller forgotten: following the next one with our SSID");
+  }
+  prefs.end();
+}
+
 }  // namespace
+
+void loadController() {
+  uint8_t mac[6];
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNamespace, true)) return;
+  const bool have = prefs.getBytesLength(kPrefsCtrlKey) == 6 &&
+                    prefs.getBytes(kPrefsCtrlKey, mac, 6) == 6;
+  prefs.end();
+  if (!have) return;
+
+  taskENTER_CRITICAL(&g_mux);
+  memcpy(g_ctrlMac, mac, 6);
+  g_ctrlKnown = true;
+  taskEXIT_CRITICAL(&g_mux);
+  Serial.printf("[now] remembered controller %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1],
+                mac[2], mac[3], mac[4], mac[5]);
+}
+
+bool controller(uint8_t mac[6]) {
+  taskENTER_CRITICAL(&g_mux);
+  const bool known = g_ctrlKnown;
+  memcpy(mac, g_ctrlMac, 6);
+  taskEXIT_CRITICAL(&g_mux);
+  return known;
+}
+
+void setController(const uint8_t mac[6]) {
+  taskENTER_CRITICAL(&g_mux);
+  memcpy(g_ctrlMac, mac, 6);
+  g_ctrlKnown = true;
+  g_ctrlDirty = true;
+  taskEXIT_CRITICAL(&g_mux);
+}
+
+void forgetController() {
+  taskENTER_CRITICAL(&g_mux);
+  g_ctrlKnown = false;
+  g_ctrlDirty = true;
+  taskEXIT_CRITICAL(&g_mux);
+}
 
 bool begin() {
   if (g_enabled) return true;
@@ -335,6 +439,22 @@ bool begin() {
 }
 
 void poll() {
+  if (g_ctrlDirty) {
+    g_ctrlDirty = false;
+    saveController();
+  }
+  if (g_otherNew) {
+    taskENTER_CRITICAL(&g_mux);
+    g_otherNew = false;
+    uint8_t mac[6];
+    char name[25];
+    memcpy(mac, g_otherMac, 6);
+    memcpy(name, g_otherName, sizeof(name));
+    taskEXIT_CRITICAL(&g_mux);
+    Serial.printf("[now] ignoring %02X:%02X:%02X:%02X:%02X:%02X \"%s\": not this dash's controller\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], name);
+  }
+
   if (!g_enabled && g_want) {
     // WiFi comes up asynchronously in the network task, so retry politely
     // (once a second) rather than failing at boot.
@@ -415,6 +535,9 @@ bool sendMode(uint8_t mode) {
   // Nothing to sign against until the controller has spoken: the nonce in the
   // packet is part of what makes the signature single-use.
   if (g_lastStatusMs == 0 || (uint32_t)(millis() - g_lastStatusMs) > 2000) return false;
+  // A command is a message to one car: ours, and only ours.
+  uint8_t target[6];
+  if (!controller(target)) return false;
 
   OhxCommand c = {};
   c.h.magic[0] = OHX_MAGIC0;
@@ -437,10 +560,10 @@ bool sendMode(uint8_t mode) {
                   offsetof(OhxCommand, hmac), full);
   memcpy(c.hmac, full, 8);
 
-  // Unicast to the controller we last heard from. The broadcast peer is
-  // registered for sending, but a command is a message to one car.
+  // Unicast to our controller. The broadcast peer is registered for sending,
+  // but a command is a message to one car.
   esp_now_peer_info_t peer = {};
-  memcpy(peer.peer_addr, g_lastSender, 6);
+  memcpy(peer.peer_addr, target, 6);
   peer.channel = 0;  // follow the station's channel
   peer.ifidx = WIFI_IF_STA;
   peer.encrypt = false;
@@ -451,7 +574,7 @@ bool sendMode(uint8_t mode) {
   }
 
   g_ackValid = false;  // this command is the one the next ack can be about
-  const esp_err_t serr = esp_now_send(g_lastSender, (const uint8_t *)&c, sizeof(c));
+  const esp_err_t serr = esp_now_send(target, (const uint8_t *)&c, sizeof(c));
   g_lastCmdMs = millis();
   if (serr != ESP_OK) {
     Serial.printf("[now] send failed: %d\n", (int)serr);

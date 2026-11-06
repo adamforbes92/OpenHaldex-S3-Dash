@@ -249,7 +249,7 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now v=tile band x=raw page m=mode o=ota O=ota-fail-test");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now f=forget controller v=tile band x=raw page m=mode o=ota O=ota-fail-test");
         break;
       case 'v': {
         // Force the tile band, for bench work: the capability decision is made
@@ -279,6 +279,10 @@ void handleSerial() {
         continue;
       case 'o':
         Serial.printf("[ota] %s | page %s\n", ota::stateLine(), ota::url());
+        continue;
+      case 'f':
+        // Forget the remembered controller: how a replaced one gets picked up.
+        ohxnow::forgetController();
         continue;
       case 'e':
 #if OHX_USE_ESP_NOW
@@ -315,6 +319,7 @@ void setup() {
   printBanner();
 
   cfg::begin();  // NVS settings first, the panel does not need them
+  ohxnow::loadController();  // which controller is ours, before the network task joins one
 
   // Before anything else that can fail: if this image is on trial and has
   // already failed, this is where the car is handed back to the previous
