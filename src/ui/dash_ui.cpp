@@ -98,14 +98,19 @@ const char *ackResultText(uint8_t r) {
   }
 }
 
-// One step: STOCK -> FWD -> 50:50 -> 60:40 -> 75:25 -> EXPERT -> STOCK. While
+// One step: STOCK -> FWD -> 50:50 -> 60:40 -> 75:25 -> EXPERT -> STOCK (or back
+// to FWD on a standalone controller, which has no STOCK). While
 // a command is still in flight the step counts from the mode we just asked
 // for, so three quick taps move three modes instead of re-sending one.
 void cycleMode() {
   const int base = g_modeCmd.pending
                        ? g_modeCmd.want
                        : (g_curMode >= 0 && g_curMode < 6 ? g_curMode : 0);
-  const uint8_t want = (uint8_t)((base + 1) % 6);
+  uint8_t want = (uint8_t)((base + 1) % 6);
+  // Standalone has no stock behaviour to fall back on, so the controller answers
+  // a request for STOCK by staying on its last mode, and still reports ok. Ask
+  // for it from EXPERT and the panel never moves again, so step over it.
+  if (want == 0 && ohxnow::last().standalone) want = 1;
 
   ModeCmd &m = g_modeCmd;
   m.want = want;
