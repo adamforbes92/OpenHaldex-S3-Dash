@@ -91,6 +91,9 @@ Stats stats();
 /// True when the last live sample is recent enough to be trusted.
 bool liveFresh(uint32_t staleMs);
 
+/// The least the network task's stack has ever had free, in bytes. 0 before it starts.
+uint32_t netStackSpareBytes();
+
 /// Force a reconnect + interval reset (called after settings change).
 void restart();
 

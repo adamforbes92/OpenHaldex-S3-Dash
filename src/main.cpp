@@ -22,6 +22,7 @@
 #include "net/datafeed.h"
 #include "app/capability.h"
 #include "app/ota.h"
+#include "app/ram.h"
 #include "version.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
@@ -193,6 +194,7 @@ void printStats() {
       (flushUs / 1000.0f) / (g_frames ? g_frames : 1),
       (waitUs / 1000.0f) / (g_frames ? g_frames : 1), vsyncs / 5.0f,
       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+  ram::printStats();  // how close internal RAM has come to running out
   g_busyUs = 0;
   g_renderUs = 0;
   g_frames = 0;
@@ -343,6 +345,9 @@ void setup() {
   delay(400);
   printBanner();
 
+  ram::begin();       // memory rules before anything asks for memory
+  canrelay::begin();  // the relay's frame tables, before the network can deliver a packet
+
   cfg::begin();  // NVS settings first, the panel does not need them
   ohxnow::loadController();  // which controller is ours, before the network task joins one
 
@@ -352,10 +357,12 @@ void setup() {
   ota::begin();
 
   const bool displayOk = crowpanel::begin();
+  ram::printCheckpoint("panel");  // shows what the bounce buffers took
   if (displayOk) {
     ui::begin();
     rawui::begin();  // the raw telemetry page, hidden until asked for
     canui::begin();  // the CAN DATA page, likewise
+    ram::printCheckpoint("UI pages");
   } else {
     // No panel means no display and no touch. Keep running so the serial
     // console stays useful and the network side can still be diagnosed:
@@ -366,6 +373,7 @@ void setup() {
   // Measured with the panel already scanning, which is the number that matters.
   crowpanel::psramBandwidthProbe();
   telemetry::begin();   // network task on core 0
+  ram::printCheckpoint("network task start");  // WiFi itself joins a moment later: see [ram] in the 5 s report
 
   Serial.println("[main] ready");
 }

@@ -15,6 +15,7 @@
 
 #include "app/config.h"
 #include "app/ota.h"
+#include "app/ram.h"
 #include "net/datafeed.h"
 #include "net/ohx_now.h"
 
@@ -39,6 +40,8 @@ HTTPClient g_httpLive;
 HTTPClient g_httpDash;
 bool g_httpLiveReady = false;
 bool g_httpDashReady = false;
+
+TaskHandle_t g_netTask = nullptr;  // the network task, so its stack can be reported
 
 float numOrNan(JsonVariantConst v) {
   if (v.isNull()) return NAN;
@@ -317,7 +320,9 @@ void logPollFailure(const char *what, int code) {
 }
 
 void pollLive() {
-  static JsonDocument doc;
+  // In PSRAM: the library keeps each name and text value as its own small piece of
+  // memory, and doing that in internal RAM on every poll would break it up over time.
+  static JsonDocument doc(ram::jsonAllocator());
   // A longer poll interval must not turn into a longer stall when the C6 is
   // unreachable: the net task has to get back round the loop to notice a
   // dropped link quickly, so the receive timeout is capped rather than simply
@@ -355,7 +360,7 @@ void pollLive() {
 }
 
 void pollDash() {
-  static JsonDocument doc;
+  static JsonDocument doc(ram::jsonAllocator());  // in PSRAM, as pollLive()
   uint16_t tmo = cfg::get().pollDashMs;
   if (tmo < 800) tmo = 800;
   const int code = fetchJson(g_httpDash, g_httpDashReady, "/api/dashboard", tmo, doc);
@@ -484,7 +489,18 @@ void begin() {
                 false, false, false, false, UINT32_MAX, NAN, -1, -1};
   g_stats = Stats{};
 
-  xTaskCreatePinnedToCore(netTask, "ohxnet", 10240, nullptr, 4, nullptr, 0);
+  xTaskCreatePinnedToCore(netTask,     // the function the task runs
+                          "ohxnet",    // its name, as shown in crash reports
+                          10240,       // stack size in bytes, in internal RAM: OTA writes flash from this task
+                          nullptr,     // nothing passed in
+                          4,           // priority
+                          &g_netTask,  // remember its handle for the stack report
+                          0);          // core 0, so the network stays off the screen's core
+}
+
+uint32_t netStackSpareBytes() {
+  if (g_netTask == nullptr) return 0;
+  return (uint32_t)uxTaskGetStackHighWaterMark(g_netTask);
 }
 
 Live live() {

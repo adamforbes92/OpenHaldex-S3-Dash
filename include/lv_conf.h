@@ -25,10 +25,27 @@
 /*====================
    MEMORY
  *====================*/
-/* Built-in allocator so UI object memory is deterministic and stays in
-   internal SRAM (the PSRAM is fully committed to the display). */
+/* ** CAN CHANGE THIS ** Where LVGL keeps its memory: every widget on every page,
+   plus the temporary buffers it draws text through.
+   1 = a 256 KB pool in PSRAM (0.5.1). Hands 96 KB of internal RAM back to WiFi and
+       the tasks. can2gauge moved its pool for the same reason (2026-10-14), and
+       later grew it because 96 KB ran out (0.31.0).
+   0 = the old 96 KB pool in internal RAM. Widgets are a little faster to reach, so
+       go back to this if [stats] render fps drops noticeably on the glass.
+   [ram] lvgl pool on the serial console shows how much of it is really in use. */
+#define DASH_LVGL_POOL_IN_PSRAM 1
+
+/* LVGL's own memory manager, so its use of memory stays predictable. */
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+#if DASH_LVGL_POOL_IN_PSRAM
+#define LV_MEM_SIZE (256U * 1024U)
+#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>  /* for heap_caps_malloc below */
+/* LVGL calls this once, in lv_init(), to get its pool. The panel has already taken
+   its frame buffers from PSRAM by then, so PSRAM is known to be working. */
+#define LV_MEM_POOL_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
 #define LV_MEM_SIZE (96U * 1024U)
+#endif
 
 /*====================
    HAL / TICK

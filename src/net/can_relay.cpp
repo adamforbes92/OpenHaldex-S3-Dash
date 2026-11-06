@@ -6,8 +6,12 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include "app/ram.h"
 #include "cannow_proto.h"
 #include "net/dbc.h"
+
+// One entry for each possible 11-bit CAN id, in the table g_slotOf11Bit.
+#define SLOT_LOOKUP_ENTRIES 2048
 
 namespace canrelay {
 namespace {
@@ -35,11 +39,16 @@ struct Slot {
 // access goes through this lock. It is held for microseconds at a time.
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
-Slot g_slots[kMaxFrames];
+// Both tables below are made in PSRAM by begin(), which keeps 7.6 KB out of internal
+// RAM on every car, relay or no relay. They are read and written like normal arrays.
+// Touching PSRAM inside the lock is fine: this runs in tasks, never in an interrupt
+// that has to keep going during a flash write.
+Slot *g_slots = nullptr;  // kMaxFrames entries
 int g_used = 0;
 // Which slot holds an 11-bit id: 0 = none yet, otherwise slot + 1. Looked up for
 // every frame, so it is a direct index, not a search. kMaxFrames must stay under 255.
-uint8_t g_slotOf11Bit[2048];
+uint8_t *g_slotOf11Bit = nullptr;  // SLOT_LOOKUP_ENTRIES entries
+bool g_tablesReady = false;        // true once both tables exist
 uint8_t g_extendedSlots[kMaxExtended];
 int g_extendedCount = 0;
 
@@ -53,6 +62,7 @@ uint32_t g_framesLastSecond = 0;
 
 // The slot for this id, or -1. Call with the lock held.
 int slotOf(uint32_t id, bool extended) {
+  if (!g_tablesReady) return -1;  // no memory for the tables: nothing was ever heard
   if (!extended) {
     return (int)g_slotOf11Bit[id & CANN_TAG_ID] - 1;
   }
@@ -104,7 +114,22 @@ bool recent(uint32_t id, uint8_t minLength, Frame &out) {
 
 }  // namespace
 
+void begin() {
+  Serial.println("[relay] Setting up the frame tables...");
+  g_slots = (Slot *)ram::psramCalloc(kMaxFrames, sizeof(Slot));
+  g_slotOf11Bit = (uint8_t *)ram::psramCalloc(SLOT_LOOKUP_ENTRIES, sizeof(uint8_t));
+  if (g_slots == nullptr || g_slotOf11Bit == nullptr) {
+    // The dash still works without these: the values come over HTTP instead, and
+    // the CAN DATA page stays empty.
+    Serial.println("[relay] NO MEMORY for the frame tables - relay packets will be ignored");
+    return;
+  }
+  g_tablesReady = true;
+  Serial.println("[relay] Set up the frame tables!");
+}
+
 void onPacket(const uint8_t *data, const int length) {
+  if (!g_tablesReady) return;
   const uint32_t now = millis();
 
   CannHdr header;
