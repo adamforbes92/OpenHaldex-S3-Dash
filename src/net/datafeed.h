@@ -15,7 +15,9 @@
 //   * a numeric field the packet marks as "no data" (OHX_NONE*) falls back to
 //     the HTTP value if HTTP has one, so a field that this Haldex generation
 //     never fills in cannot make the dashboard worse than it was
-//   * coolant is always HTTP; the lamps above are always HTTP
+//   * coolant and engine oil are always HTTP; the lamps above are always HTTP.
+//     The packet's oilTemp is the Haldex's oil, which is shown on the raw page
+//     and never on the OIL tile
 //
 // Nothing is mixed silently: sourceName() is printed in the stats line and on
 // every change of source, and 'e' on the console still dumps both transports

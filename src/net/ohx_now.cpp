@@ -664,7 +664,8 @@ void printCompare() {
   row("lockTarget", s.lockTarget, l.lockTarget, "%");
   row("lockActual", s.lockActual, l.lockActual, "%");
   row("coolant", NAN, l.coolant, "C  (HTTP only)");
-  row("oil", s.oilTemp, l.oil, "C  (ESP-NOW: oilTemp)");
+  row("engine oil", NAN, l.oil, "C  (HTTP only: Kombi_2)");
+  row("haldex oil", s.oilTemp, NAN, "C  (ESP-NOW only: Gen4 over KWP)");
   row("clutch", s.clutchTemp, NAN, "C  (ESP-NOW only)");
   row("module", s.moduleTemp, NAN, "C  (ESP-NOW only)");
   row("supply", s.supplyV, NAN, "V  (ESP-NOW only)");

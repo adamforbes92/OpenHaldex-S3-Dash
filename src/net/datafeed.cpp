@@ -72,12 +72,14 @@ telemetry::Live live() {
   if (!onNow()) return http;
 
   const Status p = ohxnow::last();
-  telemetry::Live v = http;  // keeps coolant, which the packet does not carry
+  telemetry::Live v = http;  // keeps coolant and engine oil, which the packet does not carry
   v.rpm = pick(p.rpm, http.rpm);
   v.speed = pick(p.speed, http.speed);
   v.throttle = pick(p.throttle, http.throttle);
   v.boost = pick(p.boost, http.boost);
-  v.oil = pick(p.oilTemp, http.oil);  // packet calls it oilTemp
+  // Not the packet's oilTemp: that is the Haldex's own oil (Gen4, over KWP), and
+  // the OIL tile is engine oil from Kombi_2 with engine thresholds on it. They
+  // are different fluids, so one is no fallback for the other. v.oil stays HTTP.
   v.lockTarget = pick(p.lockTarget, http.lockTarget);
   v.lockActual = pick(p.lockActual, http.lockActual);
 
