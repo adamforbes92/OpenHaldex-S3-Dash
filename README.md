@@ -872,9 +872,13 @@ Next: [TODO.md](TODO.md) — what is deliberately not built yet, and why.
 Build result:
 
 ```
-RAM:   164 060 / 327 680 B   (50.1%)   <- 96 KB of that is LVGL's own heap
+RAM:   164 060 / 327 680 B   (50.1%)   <- 0.5.0. 96 KB of that was LVGL's own heap
 Flash: 1 782 102 / 1 966 080 B (90.6%) <- of the 1.875 MB OTA slot
 ```
+
+0.5.1 moves LVGL's pool and the relay's tables to PSRAM, so its `RAM:` line should
+read about 58 000 B (17.8 %). It has not been run on a panel yet: see
+[Internal RAM](#internal-ram) below.
 
 ### Memory, exactly
 
@@ -886,6 +890,36 @@ for this chip, not a sign that something is missing.
 The 8 MB of **PSRAM** is the part that matters here: the two 800x480x16 bpp
 frame buffers are 1 536 000 B and they must live there. The build confirms the
 `qio_opi` variant is linked (`CONFIG_SPIRAM_MODE_OCT 1`).
+
+### Internal RAM
+
+Internal RAM is what runs out first: WiFi, ESP-NOW and the task stacks all have to
+have it, while PSRAM has megabytes free. Read from the 0.5.0 build's `firmware.elf`:
+
+| What | Internal RAM | |
+|---|---|---|
+| Panel bounce buffers | 76.8 KB | has to be internal; `LCD_BOUNCE_LINES` in `board_config.h` |
+| Code that must run from RAM | 67 KB | framework; WiFi and lwIP's speed-ups are already off in this build |
+| LVGL's pool | 96 KB | **in PSRAM since 0.5.1**, and 256 KB there |
+| CAN relay tables | 7.6 KB | **in PSRAM since 0.5.1** |
+| Everything else fixed | ~58 KB | framework, WiFi, the other small variables |
+
+Also since 0.5.1: ordinary memory requests of 512 B or more come from PSRAM first,
+and the JSON from `/api/live` and `/api/dashboard` is parsed in PSRAM.
+
+Every 5 s the console prints:
+
+```
+[ram] internal 120000 B free, lowest 95000 B, biggest piece 70000 B | stack spare: ui 3000 B, net 6000 B
+[ram] lvgl pool 30% of 262144 B used, peak 80000 B, biggest piece 180000 B
+```
+
+(The figures above are made up, to show the layout.) **lowest** is the one to watch.
+A failed request prints `[ram] OUT OF MEMORY ...` at once, says so in the 5 s report,
+and is reported again at the next boot if it ended in a reset.
+
+To undo the pool move, set `DASH_LVGL_POOL_IN_PSRAM` to 0 in `include/lv_conf.h`. Do
+that if the render rate drops noticeably, since widgets are slower to reach in PSRAM.
 
 ### One caveat worth knowing
 

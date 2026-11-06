@@ -53,6 +53,9 @@ struct Values {
   int handbrake = -1;   // 0 / 1
 };
 
+/// Makes the frame tables in PSRAM. Call in setup(), before the network starts.
+void begin();
+
 /// One relay packet, from the ESP-NOW receive callback (the WiFi task). The caller
 /// has already checked it came from our controller. Short, and never blocks.
 void onPacket(const uint8_t *data, int length);

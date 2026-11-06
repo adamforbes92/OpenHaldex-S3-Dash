@@ -8,7 +8,8 @@
 // =====================================================================
 #pragma once
 
-#define OHX_DASH_VERSION "0.5.0"  // CAN relay receiver, DBC tables, CAN DATA page, less HTTP
+#define OHX_DASH_VERSION "0.5.1"  // internal RAM: LVGL pool and relay tables in PSRAM, [ram] reports
+// 0.5.0 - CAN relay receiver, DBC tables, CAN DATA page, less HTTP
 
 // Date and time the image was built, which is how two builds of the same
 // version are told apart on the bench.

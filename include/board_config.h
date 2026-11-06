@@ -111,7 +111,10 @@
 // refills from PSRAM in bursts. Deeper = more slack against a WiFi burst.
 // The driver allocates TWO of these, so the cost is 2 x lines x 800 x 2 B:
 //   10 lines -> 32 KB, 16 lines -> 51 KB, 24 lines -> 77 KB.
-// Free heap at boot is ~115 KB, so stay well under half of it.
+// This is the biggest user of internal RAM left, and it has to be internal. Cutting
+// it needs a picture to judge by, so change it only with the glass in front of you:
+// [ram] after panel on the serial console shows what it took. The driver also needs
+// 480 lines to divide exactly by this number (10, 12, 15, 16, 20, 24 ...).
 //
 // 0 disables the bounce buffer entirely: the RGB DMA then streams the frame
 // buffer straight out of PSRAM, which is how LovyanGFX/Elecrow's own example

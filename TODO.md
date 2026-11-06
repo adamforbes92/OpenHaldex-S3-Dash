@@ -117,6 +117,24 @@ moved ~20 cm away from whatever it is currently sitting next to.
 Worth trying when someone has the car apart: a position that gets to −70 dBm,
 and measuring `[stats] esp-now … Hz` before and after.
 
+### 2.6 Internal RAM changes (0.5.1) on a real panel
+Written and not yet run: there was no panel to hand. With the glass in front of you,
+compare against 0.5.0:
+
+* `[stats] render ... fps`, on the dashboard page with the relay on. LVGL's widgets
+  are now in PSRAM, which the panel is already short of. If it drops noticeably, set
+  `DASH_LVGL_POOL_IN_PSRAM` to 0 in `include/lv_conf.h`.
+* The picture stays steady, including while the CAN DATA and SETTINGS pages open.
+* An over-the-air update and a settings save still work.
+* `[ram] ... lowest` after 10 minutes in the car, with the relay on and a phone on the
+  update page. Then `[ram] lvgl pool ... peak`: the pool can be cut to suit.
+
+If it is still short, in order: cut `LCD_BOUNCE_LINES` from 24 to 16 (26 KB, needs the
+glass to judge), then trim the `ohxnet` stack using `stack spare` (it must stay
+internal, because the over-the-air update writes flash from that task). Rebuilding the
+framework as can2gauge did would gain little: WiFi and lwIP's speed-ups are already out
+of internal RAM in this build, and that rebuild does not currently succeed here (§4.1).
+
 ---
 
 ## 3. Requested, and worth doing
