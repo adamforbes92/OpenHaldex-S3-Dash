@@ -8,6 +8,7 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #include <cmath>
 #include <cstring>
@@ -56,16 +57,23 @@ int intOrMinus1(JsonVariantConst v) {
 }
 
 // ------------------------------------------------------------- WiFi link
-void wifiDisconnect() { WiFi.disconnect(true, false); }
+// Leaves the association, and leaves the radio on. Passing true as the first
+// argument shuts the whole WiFi driver down (esp_wifi_stop + esp_wifi_deinit)
+// with ESP-NOW still registered on top of it, which the IDF says must be undone
+// first, and nothing here would ever have restarted the listener afterwards.
+void wifiDisconnect() { WiFi.disconnect(false, false); }
 
 // Last octet of the address used when the access point never leases one.
 // High enough to stay clear of the DHCP pool's usual .2 ... .10 range.
 constexpr uint8_t kStaticLastOctet = 203;
 
-// Association state. BSSID/channel/RSSI only read back once the station is
-// associated, so these tell "on the radio but no address" apart from "never
-// got near the AP".
-bool wifiAssociated() { return WiFi.channel() != 0; }
+// Association state, which tells "on the radio but no address" apart from
+// "never got near the AP". Asked of the driver directly: with the radio left on
+// across a rejoin, WiFi.channel() is non-zero whether associated or not.
+bool wifiAssociated() {
+  wifi_ap_record_t ap;
+  return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
 uint32_t wifiIp() { return (uint32_t)WiFi.localIP(); }
 
 // The core reports WL_CONNECTED on GOT_IP; with a static address the netif
@@ -137,11 +145,19 @@ bool wifiEnsureConnected() {
   // straight to a static address instead of spending 15 s finding out again.
   const bool preferStatic = cfg::get().netUseStatic != 0;
   IPAddress hostIp;
+  // The radio now stays on between attempts, so a static address tried on an
+  // earlier attempt is still set. It has to be taken back off by hand or DHCP
+  // never gets another go.
+  static bool staticInUse = false;
   if (preferStatic && hostIp.fromString(host)) {
     const IPAddress staticIp(hostIp[0], hostIp[1], hostIp[2], kStaticLastOctet);
     WiFi.config(staticIp, hostIp, IPAddress(255, 255, 255, 0));
+    staticInUse = true;
     Serial.printf("[net] static %s (no DHCP on this access point)\n",
                   staticIp.toString().c_str());
+  } else if (staticInUse) {
+    WiFi.config(IPAddress(), IPAddress(), IPAddress());  // all zero = back to DHCP
+    staticInUse = false;
   }
 
   Serial.printf("[net] joining \"%s\" (password %s)\n", ssid, pass[0] ? "set" : "empty");
@@ -161,6 +177,7 @@ bool wifiEnsureConnected() {
       Serial.printf("[net] associated but no DHCP lease - retrying with static %s\n",
                     staticIp.toString().c_str());
       if (WiFi.config(staticIp, hostIp, IPAddress(255, 255, 255, 0))) {
+        staticInUse = true;
         WiFi.disconnect();
         delay(100);
         WiFi.begin(ssid, pass[0] ? pass : nullptr);
@@ -367,6 +384,11 @@ void netTask(void *) {
 
   for (;;) {
     if (!wifiEnsureConnected()) {
+      // Say so: the status light's "NO WIFI" reads this, and the block further
+      // down that normally sets it is skipped while the link is down.
+      taskENTER_CRITICAL(&g_mux);
+      g_stats.wifiUp = false;
+      taskEXIT_CRITICAL(&g_mux);
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
