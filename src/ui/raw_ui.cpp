@@ -33,6 +33,7 @@
 #include "app/capability.h"
 #include "version.h"
 #include "app/config.h"
+#include "net/can_relay.h"
 #include "net/datafeed.h"
 #include "net/ohx_now.h"
 #include "net/telemetry.h"
@@ -74,6 +75,7 @@ uint32_t g_lastMs = 0;
 enum Field : uint8_t {
   F_HDR, F_FW, F_GEN, F_MODE, F_NAME, F_SRC, F_CHRSSI, F_PKTS, F_SEQNONCE, F_REJDUP, F_SENDERS,
   F_CAP_GEN, F_CAP_BOOST, F_CAP_SUPPLY, F_CAP_TEMPS, F_CAP_STEER, F_CAP_LAYOUT,
+  F_RELAY_RATE, F_RELAY_AIR, F_RELAY_SRC,
   F_RPM, F_SPEED, F_THR, F_BOOST, F_LOCKPCT, F_TEMPS, F_SUPPLY, F_SLIP,
   F_FLAGS0, F_FLAGS1, F_FLAGS2, F_FLAGS3,
   F_HRPM, F_HTHR, F_HCOOL, F_HLOCKPCT, F_HAGE,
@@ -115,6 +117,14 @@ const RowDef kRowsCaps[] = {
     {F_CAP_TEMPS, "haldex temps", false},
     {F_CAP_STEER, "steering (packet)", false},
     {F_CAP_LAYOUT, "tile band", false},
+};
+
+// The CAN relay's health: enough to tell a bad radio link from a sender that
+// cannot keep up. The frames themselves are on the CAN DATA page.
+const RowDef kRowsRelay[] = {
+    {F_RELAY_RATE, "frames/s / ids", false},
+    {F_RELAY_AIR, "air lost pkt / %", false},
+    {F_RELAY_SRC, "sender lost / age", false},
 };
 
 const RowDef kRowsB[] = {
@@ -168,7 +178,7 @@ struct Column {
 
 const Column kColumns[3] = {
     {"ESP-NOW OHX_STATUS",
-     {{nullptr, kRowsA, 11}, {"CAR CAPABILITY", kRowsCaps, 6}, {nullptr, nullptr, 0}}, 2},
+     {{nullptr, kRowsA, 11}, {"CAR CAPABILITY", kRowsCaps, 6}, {"CAN RELAY", kRowsRelay, 3}}, 3},
     {"PACKET VALUES (10 Hz)", {{nullptr, kRowsB, 8}, {"FLAGS (set bits)", kRowsB + 8, 4}, {nullptr, nullptr, 0}}, 2},
     {"HTTP / DASH", {{"HTTP /api/live", kRowsC, 5}, {"HTTP /api/dashboard", kRowsC + 5, 8}, {"LINK", kRowsC + 13, 6}}, 3},
 };
@@ -441,6 +451,20 @@ void refresh() {
   setText(g_val[F_CAP_STEER],
           waiting ? waiting : (cp.steering ? "yes (detected)" : "no (detected)"));
   setText(g_val[F_CAP_LAYOUT], layout::bandFor(cp.variant).name);
+
+  // ---- the CAN relay
+  {
+    const canrelay::Stats rs = canrelay::stats();
+    const uint32_t total = rs.packets + rs.airLost;
+    float lostPercent = 0.0f;
+    if (total > 0) lostPercent = (float)rs.airLost * 100.0f / (float)total;
+    snprintf(s, sizeof s, "%lu / %d", (unsigned long)rs.perSec, rs.ids);
+    setText(g_val[F_RELAY_RATE], s);
+    snprintf(s, sizeof s, "%lu / %.1f", (unsigned long)rs.airLost, (double)lostPercent);
+    setText(g_val[F_RELAY_AIR], s);
+    snprintf(s, sizeof s, "%lu / %s", (unsigned long)rs.srcLost, fage(a, rs.ageMs));
+    setText(g_val[F_RELAY_SRC], s);
+  }
 
   // ---- column B: the packet's values
   if (p.valid) {

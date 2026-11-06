@@ -39,6 +39,7 @@
 #include "app/ota.h"
 #include "theme.h"
 #include "ohx_proto.h"
+#include "ui/can_ui.h"
 #include "ui/raw_ui.h"
 
 namespace ui {
@@ -880,6 +881,8 @@ void onCfgRaw(lv_event_t *) {
   rawui::show(true);
 }
 
+void onCfgCan(lv_event_t *) { canui::show(true); }
+
 void buildSettings() {
   w.settings = lv_obj_create(lv_layer_top());
   lv_obj_remove_flag(w.settings, LV_OBJ_FLAG_SCROLLABLE);
@@ -977,6 +980,7 @@ void buildSettings() {
 
   button(card, 0, y, 90, 30, "DEFAULTS", onCfgDefaults);
   button(card, 100, y, 82, 30, "RAW DATA", onCfgRaw);
+  button(card, 192, y, 82, 30, "CAN DATA", onCfgCan);
   button(card, 600, y, 74, 30, "SAVE", onCfgSave);
   button(card, 682, y, 70, 30, "CLOSE", onCfgClose);
 

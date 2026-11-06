@@ -6,7 +6,7 @@
 //
 // Task layout:
 //   core 1  Arduino loop  -> LVGL rendering + dashboard refresh
-//   core 0  "ohxnet"      -> WiFi + /api/live (10 Hz) + /api/dashboard (1 Hz)
+//   core 0  "ohxnet"      -> WiFi + as little HTTP as the data allows (net/datafeed.h)
 //
 // Keeping the network on the second core is the main reason this runs on
 // the S3 at all: the C6 is single-core, so there a 10 Hz JSON poll competes
@@ -25,6 +25,8 @@
 #include "version.h"
 #include "app/config.h"
 #include "ui/dash_ui.h"
+#include "net/can_relay.h"
+#include "ui/can_ui.h"
 #include "ui/raw_ui.h"
 
 namespace {
@@ -131,8 +133,9 @@ void printStats() {
     } else {
       snprintf(ageTxt, sizeof(ageTxt), "%lu ms", (unsigned long)nowAge);
     }
-    Serial.printf("[stats] source %s (packet age %s, http %s)\n", feed::sourceName(), ageTxt,
-                  s.wifiUp ? "up" : "down");
+    Serial.printf("[stats] source %s (packet age %s, http %s, live every %lu ms, dash every %lu ms)\n",
+                  feed::sourceName(), ageTxt, s.wifiUp ? "up" : "down",
+                  (unsigned long)feed::livePeriodMs(), (unsigned long)feed::dashPeriodMs());
   }
 #if OHX_USE_ESP_NOW
   {
@@ -144,6 +147,18 @@ void printStats() {
                     n.ageMs == UINT32_MAX ? "never" : "live", (unsigned long)n.rejects,
                     (unsigned long)n.duplicates, (unsigned long)n.gaps, (unsigned)n.channel,
                     (int)n.rssi);
+    }
+    // The relay's own line, once it has said anything: how much of the bus is
+    // reaching this dash, and where the rest went.
+    const canrelay::Stats r = canrelay::stats();
+    if (r.packets > 0) {
+      const uint32_t total = r.packets + r.airLost;
+      Serial.printf("[stats] relay %lu f/s, %d ids, %lu pkt, air lost %lu (%.1f%%), sender lost %lu, "
+                    "rej %lu, full %lu\n",
+                    (unsigned long)r.perSec, r.ids, (unsigned long)r.packets,
+                    (unsigned long)r.airLost, (double)r.airLost * 100.0 / (double)total,
+                    (unsigned long)r.srcLost, (unsigned long)r.rejects,
+                    (unsigned long)r.tableFull);
     }
   }
 #endif
@@ -249,7 +264,7 @@ void handleSerial() {
         }
         continue;
       case 'h':
-        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now f=forget controller v=tile band x=raw page m=mode o=ota O=ota-fail-test");
+        Serial.println("1=arcs 2=needle 3=ticks 4=digits 5=readouts 6=status 0=all 9=none p=pclk b=bounce d=dump n=polling e=esp-now f=forget controller v=tile band x=raw page c=can page C=can dump m=mode o=ota O=ota-fail-test");
         break;
       case 'v': {
         // Force the tile band, for bench work: the capability decision is made
@@ -264,7 +279,17 @@ void handleSerial() {
       case 'x':
         // The raw telemetry page: every value the dash can see, over both
         // transports, with absent fields shown as "--".
+        if (canui::visible()) canui::show(false);
         rawui::toggle();
+        continue;
+      case 'c':
+        // The CAN DATA page: every id the controller is relaying, decoded.
+        if (rawui::visible()) rawui::show(false);
+        canui::toggle();
+        continue;
+      case 'C':
+        // The same, on the console, for pasting into a report.
+        canui::dumpToSerial();
         continue;
       case 'm':
         // The mode switch, from the console: identical to tapping the HALDEX
@@ -330,6 +355,7 @@ void setup() {
   if (displayOk) {
     ui::begin();
     rawui::begin();  // the raw telemetry page, hidden until asked for
+    canui::begin();  // the CAN DATA page, likewise
   } else {
     // No panel means no display and no touch. Keep running so the serial
     // console stays useful and the network side can still be diagnosed:
@@ -376,6 +402,7 @@ void loop() {
     // The raw page is refreshed first: while it is up the dashboard tick
     // returns immediately, so this is the only thing drawing.
     rawui::tick();
+    canui::tick();
     ui::tick();
   }
 

@@ -36,6 +36,7 @@ enum class Page : uint8_t {
   Dashboard,
   Settings,
   Raw,  // the raw telemetry page (src/ui/raw_ui.cpp)
+  Can,  // the CAN DATA page (src/ui/can_ui.cpp)
 };
 
 void setPage(Page p);

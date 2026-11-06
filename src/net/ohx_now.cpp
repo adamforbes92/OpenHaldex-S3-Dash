@@ -25,7 +25,9 @@
 #include <string.h>
 
 #include "net/telemetry.h"
+#include "net/can_relay.h"
 #include "net/datafeed.h"
+#include "cannow_proto.h"
 #include "ohx_proto.h"
 
 namespace ohxnow {
@@ -197,6 +199,16 @@ void decode(const uint8_t *p, size_t len, const uint8_t *src, int16_t rssi, uint
 // Runs in the WiFi task. Validate, decode, count; no printing, no loops
 // that can block, and take the spinlock only around the shared state.
 void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  // ESP-NOW has one receive callback, so the CAN relay's packets arrive here too.
+  // They are only taken from our own controller, as the status packets are.
+  if (len >= (int)sizeof(CannHdr) && data[0] == CANN_MAGIC0 && data[1] == CANN_MAGIC1) {
+    taskENTER_CRITICAL(&g_mux);
+    const bool ours = g_ctrlKnown && memcmp(g_ctrlMac, info->src_addr, 6) == 0;
+    taskEXIT_CRITICAL(&g_mux);
+    if (ours) canrelay::onPacket(data, len);
+    return;
+  }
+
   if (len != (int)sizeof(OhxStatus) || data[0] != OHX_MAGIC0 || data[1] != OHX_MAGIC1 ||
       data[2] != OHX_T_STATUS || data[3] != OHX_PROTO) {
     taskENTER_CRITICAL(&g_mux);

@@ -6,12 +6,17 @@
 #include <Arduino.h>
 #include <math.h>
 
+#include "app/config.h"
+#include "net/can_relay.h"
 #include "net/ohx_now.h"
 
 namespace feed {
 namespace {
 
 using ohxnow::Status;
+
+constexpr uint32_t kLiveSlowMs = 5000;  // /api/live while it only has temperatures to add
+constexpr uint32_t kDashSlowMs = 2000;  // /api/dashboard while it only has the AWD lamp to add
 
 // The last source we logged, so a transition is printed exactly once.
 Source g_lastLogged = Source::None;
@@ -56,6 +61,7 @@ const char *sourceName() { return label(source()); }
 void poll() {
 #if OHX_USE_ESP_NOW
   ohxnow::poll();
+  canrelay::poll();
 #endif
 
   const Source s = source();
@@ -72,14 +78,17 @@ telemetry::Live live() {
   if (!onNow()) return http;
 
   const Status p = ohxnow::last();
-  telemetry::Live v = http;  // keeps coolant and engine oil, which the packet does not carry
+  telemetry::Live v = http;  // keeps coolant and engine oil unless the relay has them
   v.rpm = pick(p.rpm, http.rpm);
   v.speed = pick(p.speed, http.speed);
   v.throttle = pick(p.throttle, http.throttle);
   v.boost = pick(p.boost, http.boost);
   // Not the packet's oilTemp: that is the Haldex's own oil (Gen4, over KWP), and
   // the OIL tile is engine oil from Kombi_2 with engine thresholds on it. They
-  // are different fluids, so one is no fallback for the other. v.oil stays HTTP.
+  // are different fluids, so one is no fallback for the other.
+  const canrelay::Values relay = canrelay::values(p.generation);
+  if (!isnan(relay.oil)) v.oil = relay.oil;
+  if (!isnan(relay.coolant)) v.coolant = relay.coolant;
   v.lockTarget = pick(p.lockTarget, http.lockTarget);
   v.lockActual = pick(p.lockActual, http.lockActual);
 
@@ -96,7 +105,7 @@ telemetry::Dash dash() {
   if (!onNow()) return http;
 
   const Status p = ohxnow::last();
-  telemetry::Dash v = http;  // keeps tcOn / asrOn / awdWarning, HTTP only
+  telemetry::Dash v = http;  // keeps awdWarning, which only HTTP has
   v.mode = (int)p.mode;      // always a real byte in the packet
   v.haldexState = (int)p.haldexState;
   v.lockTarget = pickInt(p.lockTarget, http.lockTarget);
@@ -107,8 +116,30 @@ telemetry::Dash dash() {
   v.handbrakeIn = p.handbrake;
   v.couplingOpen = p.couplingOpen;
   v.tempProtection = p.tempProtection;
+  // The API works these out from the same two flags: on = not forced off, and
+  // null (so off here) without chassis CAN.
+  v.tcOn = p.chassisCan && !p.tcForce;
+  v.asrOn = p.chassisCan && !p.asrOff;
+  const canrelay::Values relay = canrelay::values(p.generation);
+  if (relay.brake >= 0) v.brakeFromCAN = relay.brake;
+  if (relay.handbrake >= 0) v.handbrakeFromCAN = relay.handbrake;
   v.everOk = true;
   return v;
+}
+
+uint32_t livePeriodMs() {
+  const uint32_t normal = cfg::get().pollLiveMs;
+  if (!onNow()) return normal;
+  if (!isnan(canrelay::values(ohxnow::last().generation).coolant)) return 0;
+  return kLiveSlowMs;
+}
+
+uint32_t dashPeriodMs() {
+  const uint32_t normal = cfg::get().pollDashMs;
+  if (!onNow()) return normal;
+  const canrelay::Values relay = canrelay::values(ohxnow::last().generation);
+  if (relay.brake >= 0 && relay.handbrake >= 0 && normal < kDashSlowMs) return kDashSlowMs;
+  return normal;
 }
 
 bool fresh(uint32_t staleMs) {
