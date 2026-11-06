@@ -62,8 +62,10 @@ void begin();
 /// Validated, clamped, saved to NVS.
 void apply(const Data &d);
 
-/// Restore the shipped defaults (keeps NVS credentials).
-void setDefaults();
+/// The shipped defaults, validated. Nothing is applied or saved: the caller
+/// decides what to keep (the DEFAULTS button keeps the connection) and hands
+/// the result to apply().
+Data defaults();
 
 /// Current values. The UI thread owns writes; scalars are read directly by
 /// the network task, strings are copied under a lock.
@@ -73,7 +75,12 @@ const Data &get();
 void connectionCopy(char *ssid, size_t ssidLen, char *pass, size_t passLen, char *host,
                     size_t hostLen, uint16_t &port);
 
-/// Bumped every time apply() runs, so the network task can reconnect.
+/// Bumped when the connection settings change (ssid, password, host, port), so
+/// the network task knows to rejoin. Nothing else moves it: rejoining means a
+/// few seconds of stale data, which a brightness change must not cost.
 uint32_t revision();
+
+/// Ask the network task to rejoin even though nothing changed.
+void requestReconnect();
 
 }  // namespace cfg

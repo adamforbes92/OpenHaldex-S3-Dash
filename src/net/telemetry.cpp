@@ -454,10 +454,8 @@ Stats stats() {
 bool liveFresh(uint32_t staleMs) { return g_liveOkMs != 0 && (millis() - g_liveOkMs) <= staleMs; }
 
 void restart() {
-  // Re-applying bumps cfg::revision(), which the network task watches: it
-  // drops the link and reconnects with the new SSID / host.
-  cfg::Data d = cfg::get();
-  cfg::apply(d);
+  // The network task watches cfg::revision(): it drops the link and rejoins.
+  cfg::requestReconnect();
 }
 
 }  // namespace telemetry

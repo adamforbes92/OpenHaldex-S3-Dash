@@ -847,11 +847,12 @@ void onCfgSave(lv_event_t *) {
 
 void onCfgDefaults(lv_event_t *) {
   const cfg::Data keep = cfg::get();
-  cfg::setDefaults();
-  cfg::Data fresh = cfg::get();
+  cfg::Data fresh = cfg::defaults();
   strncpy(fresh.ssid, keep.ssid, sizeof(fresh.ssid) - 1);
   strncpy(fresh.pass, keep.pass, sizeof(fresh.pass) - 1);
   strncpy(fresh.host, keep.host, sizeof(fresh.host) - 1);
+  fresh.port = keep.port;
+  fresh.netUseStatic = keep.netUseStatic;  // learnt on this car, not a preference
   cfg::apply(fresh);
   g_edit = cfg::get();
   lv_textarea_set_text(g_taSsid, g_edit.ssid);
