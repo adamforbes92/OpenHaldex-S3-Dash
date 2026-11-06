@@ -68,7 +68,15 @@ handbrake, so:
 The raw telemetry page (`x`) exists for exactly this: it shows every field
 raw, so a tester can report back without a laptop and without this agent.
 
-### 2.2 A wrong *project* image is accepted
+### 2.2 The CAN relay in the car
+Built and believed, not yet measured. What it costs in render rate, how much it
+loses in the air at this car's −76 to −86 dBm (the controller sends at 6 Mbit/s
+while relaying, which has less margin than the 1 Mbit/s the link was measured at),
+and which relay setting to recommend. MQB coolant and oil from `Motor_07` have
+never been on a car through this path. The whole test is in
+[`docs/can-relay-test.md`](docs/can-relay-test.md).
+
+### 2.3 A wrong *project* image is accepted
 The IDF refuses an image for another chip (verified in its source:
 `mismatch chip ID, expected %d, found %d`, on the same verify path
 `Update.end()` uses). It does **not** care whose project the image is, so a
@@ -87,7 +95,7 @@ reachable from the controller's access point, and the controller's access
 point is out of range of the development machine. Until then the README says
 plainly: take the file from this repository's releases and nothing else.
 
-### 2.3 The unexplained reset
+### 2.4 The unexplained reset
 One reset, 8 s after the first post-update boot, while the station was
 re-associating. No panic, a clean ROM banner, no repeats in 180 s of idle
 running afterwards, and the trial logic handled it correctly in passing.
@@ -100,7 +108,7 @@ rejoin shut the WiFi driver down with ESP-NOW still running on top of it. The bo
 answers the question instead of prompting another guess. Watch it on the car's
 supply, which is a different animal.
 
-### 2.4 Link margin
+### 2.5 Link margin
 The ESP-NOW link sits at −76 to −86 dBm in the car and delivers 6–9 Hz rather
 than the full 10, with occasional gaps. Nothing is wrong with the code —
 broadcast has no retransmission — but the dash would look better with the S3
@@ -209,8 +217,8 @@ console show both transports side by side. The evidence, the three-path
 comparison and a suggested fix are written up ready to paste in
 [`docs/upstream-steering-report.md`](docs/upstream-steering-report.md).
 
-### 4.5 `ohx_proto.h` must be refreshed from upstream
-It is a verbatim copy of the controller's shared header. If the C6's struct
+### 4.5 `ohx_proto.h` and `cannow_proto.h` must be refreshed from upstream
+They are verbatim copies of the controller's shared headers. If the C6's struct
 changes and this copy does not, the `static_assert` on the packet size will
 catch it — but only if someone looks. Worth a note in the release checklist.
 

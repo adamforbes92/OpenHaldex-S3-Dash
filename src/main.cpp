@@ -142,11 +142,11 @@ void printStats() {
     const ohxnow::Stats n = ohxnow::stats();
     if (n.enabled) {
       Serial.printf("[stats] esp-now %lu pkt (%.1f Hz), age %s, rej %lu dup %lu gap %lu, "
-                    "ch %u, rssi %d dBm\n",
+                    "ignored %lu, ch %u, rssi %d dBm\n",
                     (unsigned long)n.packets, (double)n.hz,
                     n.ageMs == UINT32_MAX ? "never" : "live", (unsigned long)n.rejects,
-                    (unsigned long)n.duplicates, (unsigned long)n.gaps, (unsigned)n.channel,
-                    (int)n.rssi);
+                    (unsigned long)n.duplicates, (unsigned long)n.gaps,
+                    (unsigned long)n.ignored, (unsigned)n.channel, (int)n.rssi);
     }
     // The relay's own line, once it has said anything: how much of the bus is
     // reaching this dash, and where the rest went.

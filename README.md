@@ -53,9 +53,14 @@ If you are looking for the controller rather than a display for it, that is
 the project you want.
 
 The two sides communicate using interfaces the C6 already exposed, so neither
-needed changing: `include/ohx_proto.h` here is a **verbatim copy** of the
-controller's shared wire-format header (taken from `b54d9a1d`). Refresh it
-from upstream; never edit it.
+needed changing: `include/ohx_proto.h` and `include/cannow_proto.h` here are
+**verbatim copies** of the controller's shared wire-format headers. Refresh them
+from upstream; never edit them.
+
+The CAN database behind the CAN DATA page is **[opendbc](https://github.com/commaai/opendbc)**
+by comma.ai (MIT), with the VW names translated to English by Forbes Automotive:
+see [`dbc/SOURCE.md`](dbc/SOURCE.md). Bug fixes, the CAN relay receiver and the CAN
+DATA page were contributed by **Adam Forbes**.
 
 ---
 
@@ -145,24 +150,26 @@ if a differently-mounted panel needs another one.
 
 ## 3. Data flow
 
-Two transports feed the dashboard. **ESP-NOW is the primary** — the
+Three things feed the dashboard. **ESP-NOW is the primary** — the
 controller broadcasts a packed status packet every 100 ms with no web stack
-involved, so there is no association, no socket and no TCP in that path. HTTP
-is the fallback, and it still carries the fields the packet does not have.
+involved, so there is no association, no socket and no TCP in that path. With
+its **CAN relay** switched on, it broadcasts the car's frames the same way. HTTP
+is the fallback, and it still carries what neither of those has.
 
 ```
         core 0                                 core 1
 +-----------------------------+        +---------------------------+
 | "ohxnet" task               |        | loop()                    |
 |   WiFi STA -> C6 HTTP API   | struct |   ui::tick()     ~30 Hz   |
-|   GET /api/live       1 Hz  | --+    |   feed::poll()            |
-|   GET /api/dashboard  1 Hz  |   |    |   lv_timer_handler()      |
+|   GET /api/live     0-1 Hz  | --+    |   feed::poll()            |
+|   GET /api/dashboard ~1 Hz  |   |    |   lv_timer_handler()      |
 | ESP-NOW receive (radio, no  |   +--> |---------------------------|
 |   association, no sockets)  |        | net/datafeed.cpp: choose  |
 +-----------------------------+        |   source, merge fields    |
       ^  ~10 Hz, no HTTP              | LVGL -> 2x 800x480 PSRAM  |
       |                               | frame buffers -> RGB DMA  |
    C6 broadcasts OHX_STATUS           +---------------------------+
+   (and CAN relay packets)
    to FF:FF:FF:FF:FF:FF
 ```
 
@@ -172,8 +179,9 @@ is the fallback, and it still carries the fields the packet does not have.
 |---|---|
 | `rpm`, `speed`, `throttle`, `boost`, `lockTarget`, `lockActual` | ESP-NOW while packets arrive (holds 500 ms), else HTTP |
 | `mode`, `haldexState`, `chassisCAN`, `haldexCAN`, `brakeIn`, `handbrakeIn`, `couplingOpen`, `tempProtection` | ESP-NOW — the packet has real bits for all of these |
-| `coolant`, `oil` | always HTTP — the packet has no coolant field, and its `oilTemp` is the Haldex's oil, not the engine's |
-| `tcOn`, `asrOn`, `awdWarning` | always HTTP — the packet carries `TC_FORCE` / `ASR_OFF` (off flags), which are not the same thing |
+| `coolant`, `oil`, `brakeFromCAN`, `handbrakeFromCAN` | the CAN relay while it is carrying them, else HTTP. The packet has none of these: its `oilTemp` is the Haldex's oil, not the engine's |
+| `tcOn`, `asrOn` | ESP-NOW — the packet's `TC_FORCE` / `ASR_OFF`, inverted, which is exactly how the controller's API works them out |
+| `awdWarning` | always HTTP — it comes from Haldex data, which is on the bus the relay does not carry |
 | packets stopped | everything falls back to HTTP, and says so on the console |
 
 A numeric field the packet marks as "no data" falls back to the HTTP value if
@@ -182,10 +190,17 @@ dashboard worse than it was. The source in use is printed in the stats line
 and on every change (`[feed] values now come from esp-now`), and `e` on the
 console dumps both transports side by side.
 
-| Endpoint | Rate | Fields used |
+HTTP is only asked for what nothing else is delivering, because every request
+costs the panel frames and costs the controller's single core time:
+
+| | `/api/live` | `/api/dashboard` |
 |---|---|---|
-| `/api/live` | 1000 ms | `coolantTemp` — and everything, if the packets stop |
-| `/api/dashboard` | 1000 ms | `tcOn`, `asrOn`, `awdWarning` — and everything, if the packets stop |
+| Packets stopped | 1000 ms: everything | 1000 ms: everything |
+| Packets, no relay | 5000 ms: coolant and oil | 1000 ms: brake, handbrake, AWD lamp |
+| Packets and relay | not at all | 2000 ms: the AWD lamp |
+
+The rate in force is on the `[stats] source` line. The fallback starts within
+100 ms of the packets stopping, however slow the previous rate was.
 
 Because ESP-NOW needs no association, the dashboard goes **LIVE before the
 WiFi join completes** — `[ui] LIVE (data age 21 ms, source esp-now)` while
@@ -193,10 +208,11 @@ WiFi join completes** — `[ui] LIVE (data age 21 ms, source esp-now)` while
 
 ### Why HTTP is still there
 
-Three reasons, all deliberate: coolant temperature is not in the packet; the
-three lamps above are not in it with matching semantics; and if the controller
-stops broadcasting (older firmware, ESP-NOW disabled, out of range) the
-dashboard keeps working at 1 Hz instead of going dark.
+Three reasons, all deliberate: without the relay, coolant and engine oil are not
+on the air at all; the AWD lamp comes from Haldex data, which the relay does not
+carry; and if the controller stops broadcasting (older firmware, ESP-NOW
+disabled, out of range) the dashboard keeps working at 1 Hz instead of going
+dark. The station also stays joined because the update page lives on its address.
 
 ### Why two poll rates
 
@@ -516,6 +532,8 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 | `e` | ESP-NOW vs HTTP, every field side by side |
 | `f` | forget the remembered controller (see [Which controller](#which-controller)) |
 | `x` | open / close the raw telemetry page (all of the above on the glass) |
+| `c` | open / close the CAN DATA page |
+| `C` | print every CAN id heard, and the selected one's signals |
 | `v` | force the other tile band, for bench work (see 'What the car can fill') |
 | `m` | step the Haldex mode — the same as tapping the HALDEX panel |
 | `E` | enable / disable the ESP-NOW listener (A/B its cost on one boot) |
@@ -694,14 +712,53 @@ is what makes that noticeable.
 
 Full plan, risks and phase notes: [`docs/esp-now-plan.md`](docs/esp-now-plan.md).
 
+### The CAN relay
+
+Switch on **Relay CAN Frames to Gauges** in the controller's web UI (Controller
+Options; it is off by default) and it broadcasts the frames it receives on its
+chassis bus, batched into packets. The dash needs no setting: it picks them up
+as soon as they arrive, from its own controller only. That gives it:
+
+* **less HTTP**, because the tiles and lamps can read the car directly (see
+  [Data flow](#3-data-flow));
+* **coolant and oil on MQB**, which the controller's API does not report. Read from
+  `Motor_07` (0x640), and not yet checked on a car;
+* **the CAN DATA page**: **SETTINGS → CAN DATA**, or `c` on the console. Every id on
+  the bus with its name and rate. Tap one to see every signal in it, decoded.
+
+The names and scaling come from tables compiled into the firmware: `vw_pq` (Gen1,
+Gen2, Gen4, 0AY) and `vw_mqb` (Gen5), about 72 KB of flash for 199 messages and 2612
+signals. They are generated by `tools/make_dbc_tables.py` from `dbc/`. Other makes
+show raw bytes. A compiled table beats a file on the LittleFS partition because the
+update page only updates the app.
+
+The tiles and lamps do **not** go through the DBC. They read the same bytes the
+controller reads, because those have been proved on a car and a DBC can be wrong:
+`vw_pq` lumps the handbrake in with the brake-fluid warning as one 2-bit field.
+
+What the relay does not carry:
+
+* **Bus 1**, so the Haldex's own frames. Its lock and status arrive in the status
+  packet instead.
+* Anything the controller transmits itself, including the edited frames it sends
+  the Haldex. What is shown is what the car sent.
+
+Broadcast has no retransmission, so this is a live view, not a lossless log. The
+counters say how much went missing: `air lost` is packets that never arrived,
+`sender lost` is frames the controller could not fit in its queue.
+
+**Not yet measured in a car**: what the relay costs in render rate and how much it
+loses. The test is written up in [`docs/can-relay-test.md`](docs/can-relay-test.md).
+
 ---
 
 ## 12. What this device cannot show
 
 Data the controller does not expose, or has no room for here:
 
-* Engine oil **pressure**, fuel pressure, individual wheel speeds.
-* Gear position and clutch state.
+* On the dashboard itself: engine oil **pressure**, fuel pressure, individual wheel
+  speeds, gear position and clutch state. Where the car's powertrain CAN has them,
+  the CAN DATA page shows them with the relay on.
 * Battery voltage — this *is* available, but only in the ESP-NOW broadcast
   (`supplyMv`), not over HTTP. The dash receives it; it has no space on the
   layout yet.
@@ -723,6 +780,7 @@ include/
   lv_conf.h                 LVGL v9 config (partial; defaults fill the rest)
   ohx_proto.h               ESP-NOW wire format - verbatim copy of the
                             controller's shared header; refresh, never edit
+  cannow_proto.h            CAN relay wire format - verbatim copy, likewise
   wifi_secrets.h.example    optional bench credentials
 
 src/
@@ -732,20 +790,25 @@ src/
     pca9557.h/.cpp          expander driver + I2C probe
   net/
     telemetry.h/.cpp        WiFi + /api/live + /api/dashboard, core 0 task
-    ohx_now.h/.cpp          ESP-NOW listener: decode + counters
-    datafeed.h/.cpp         source selection: ESP-NOW packets vs HTTP
+    ohx_now.h/.cpp          ESP-NOW listener: decode + counters, which controller
+    can_relay.h/.cpp        CAN relay receiver: latest copy of each id, counters
+    dbc.h/.cpp              look up and decode signals from the tables
+    dbc_tables.cpp          the tables, generated from dbc/
+    datafeed.h/.cpp         source selection, and how often HTTP is worth asking
   app/
     config.h/.cpp           NVS-backed settings, validation, revision counter
   ui/
     dash_ui.h/.cpp          the whole dashboard in LVGL
     raw_ui.h/.cpp           raw telemetry page: both transports, no
                             interpretation, "--" for a field with no value
+    can_ui.h/.cpp           CAN DATA page: every id heard, decoded from the DBC
     fonts/
       font_rpm_96.c         96 px rev digits, generated (tools/make_fonts.sh)
       font_num_56.c         56 px boost value, generated
 
 tools/
   make_fonts.sh             regenerate src/ui/fonts from tools/fonts/*.ttf
+  make_dbc_tables.py        regenerate src/net/dbc_tables.cpp from dbc/
   mockup_dash.py            draw the layout at panel size before coding it
   serial_capture.py         reset + read the console (read-only)
   serial_watch.py           read the console without resetting the board
@@ -755,7 +818,10 @@ tools/
   serial_tune.py            mask sweep: render cost per redraw group
   fonts/                    Montserrat Bold (OFL) + licence
 
+dbc/                        vw_pq and vw_mqb, from opendbc (MIT), with English names
+
 docs/
+  can-relay-test.md         how to measure the CAN relay in the car
   redesign-bars.md          why the top band is a bar, and its measurements
   esp-now-plan.md           the ESP-NOW transport, its risks and phases
   mockups/                  the mock-ups the layout was chosen from
@@ -792,7 +858,8 @@ Working on the bench against a live controller, and now verified in the car:
   HTTP 500 and nothing written. Confirmed from a phone on the controller's own
   access point as well.
 
-**Still to be exercised in the car:** the value scaling for `boost` — none of
+**Still to be exercised in the car:** the CAN relay and the CAN DATA page
+([test procedure](docs/can-relay-test.md)); and the value scaling for `boost` — none of
 the reference car's data has come from a boost source yet, since a Gen1 Haldex
 has no boost frame at all, and the Full band itself remains unverified. One
 unexplained chip reset was seen 8 s after the first post-update boot while the

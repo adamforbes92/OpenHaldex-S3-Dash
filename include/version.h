@@ -8,7 +8,7 @@
 // =====================================================================
 #pragma once
 
-#define OHX_DASH_VERSION "0.4.2"  // settings survive a reboot, one controller, radio stays up on a rejoin
+#define OHX_DASH_VERSION "0.5.0"  // CAN relay receiver, DBC tables, CAN DATA page, less HTTP
 
 // Date and time the image was built, which is how two builds of the same
 // version are told apart on the bench.
