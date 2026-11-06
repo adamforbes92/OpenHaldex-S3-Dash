@@ -170,9 +170,9 @@ is the fallback, and it still carries the fields the packet does not have.
 
 | Field | Source |
 |---|---|
-| `rpm`, `speed`, `throttle`, `boost`, `lockTarget`, `lockActual`, `oil` | ESP-NOW while packets arrive (holds 500 ms), else HTTP |
+| `rpm`, `speed`, `throttle`, `boost`, `lockTarget`, `lockActual` | ESP-NOW while packets arrive (holds 500 ms), else HTTP |
 | `mode`, `haldexState`, `chassisCAN`, `haldexCAN`, `brakeIn`, `handbrakeIn`, `couplingOpen`, `tempProtection` | ESP-NOW — the packet has real bits for all of these |
-| `coolant` | always HTTP — the packet has no coolant field |
+| `coolant`, `oil` | always HTTP — the packet has no coolant field, and its `oilTemp` is the Haldex's oil, not the engine's |
 | `tcOn`, `asrOn`, `awdWarning` | always HTTP — the packet carries `TC_FORCE` / `ASR_OFF` (off flags), which are not the same thing |
 | packets stopped | everything falls back to HTTP, and says so on the console |
 
@@ -415,7 +415,8 @@ Defaults match the browser page:
 All of it is editable on the device's Settings page and stored in NVS
 (`Preferences`, namespace `ohxdash`) as one versioned blob, so a firmware
 update that changes the struct layout falls back to defaults instead of
-reading garbage.
+reading garbage. Saving only rejoins the WiFi if the SSID, password, host or
+port actually changed.
 
 **No credentials are in git.** For bench work, copy
 `include/wifi_secrets.h.example` to `include/wifi_secrets.h` (gitignored) and
@@ -513,6 +514,7 @@ draws the layout at panel size before it is coded is `tools/mockup_dash.py`.
 | `d` | print the frame buffer the panel is scanning as an ASCII luminance map |
 | `n` | pause / resume the HTTP polling |
 | `e` | ESP-NOW vs HTTP, every field side by side |
+| `f` | forget the remembered controller (see [Which controller](#which-controller)) |
 | `x` | open / close the raw telemetry page (all of the above on the glass) |
 | `v` | force the other tile band, for bench work (see 'What the car can fill') |
 | `m` | step the Haldex mode — the same as tapping the HALDEX panel |
@@ -617,7 +619,25 @@ no matching flag for, and as the fallback if the packets stop.
 nothing in render rate: the loop stays at ~60.2 ms busy out of a 61.0 ms
 period with the listener on or off.
 
-In the car, `e` is the cross-check that matters: it prints both transports
+### Which controller
+
+A broadcast reaches every dash in range, and two controllers can share the
+default SSID. So the first one heard whose name matches the configured SSID is
+remembered by MAC, in NVS, and from then on:
+
+* packets from anyone else are counted (`ignored`) and dropped, with one console
+  line per MAC;
+* commands are only ever sent to that MAC;
+* the station's join is aimed at that MAC, so the HTTP values cannot come from a
+  different car than the ESP-NOW ones.
+
+A replaced controller is picked up by changing the SSID, pressing **DEFAULTS** in
+Settings, or `f` on the console. The first boot takes whichever matching
+controller it hears first, so do it away from other cars.
+
+### In the car
+
+`e` is the cross-check that matters: it prints both transports
 field by field, so any field whose scaling differs — `boost` is the one to
 watch, since the packet documents it as "mbar above ambient" — is visible
 rather than guessed at.
@@ -626,7 +646,9 @@ rather than guessed at.
 
 The same wire format carries the other way. **Tap anywhere on the HALDEX
 panel** and the mode steps on: Stock → FWD → 50:50 → 60:40 → 75:25 → Expert →
-Stock. One tap, one step — no list, no confirmation, no modal. `m` on the
+Stock. A standalone controller has no Stock to go to (it answers by staying on
+its last mode), so there the step goes from Expert back to FWD. One tap, one
+step — no list, no confirmation, no modal. `m` on the
 console does exactly the same thing, which is how the path gets exercised
 without touching the glass.
 
@@ -634,8 +656,8 @@ The command is 22 bytes — magic, type, proto, the controller's nonce, a
 per-dash sequence, the command byte and its arguments — signed with
 **HMAC-SHA256**, truncated to 8 bytes. The key is the controller's
 access-point password: the same string the station joins with. It is unicast
-to the MAC the last status packet came from, and this is the only thing this
-firmware ever transmits.
+to the [remembered controller](#which-controller), and this is the only thing
+this firmware ever transmits.
 
 The controller does not reply directly. It publishes the answer in the ack
 fields of its next broadcast (`ackSrc`, `ackSeq`, `ackResult`), so the

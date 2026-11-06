@@ -8,7 +8,7 @@
 // =====================================================================
 #pragma once
 
-#define OHX_DASH_VERSION "0.4.1"  // 2B: over-the-air update page, self-revert trial
+#define OHX_DASH_VERSION "0.4.2"  // settings survive a reboot, one controller, radio stays up on a rejoin
 
 // Date and time the image was built, which is how two builds of the same
 // version are told apart on the bench.

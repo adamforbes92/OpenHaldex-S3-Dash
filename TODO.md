@@ -61,9 +61,9 @@ handbrake, so:
 * the capability table's "table" half (boost from generation) has only ever
   been exercised on the car that *lacks* the source;
 * Gen2/4/50/52 differences still unknown: which generations fill `slip[4]`,
-  what `oilTemp` means per generation (packet oil is Haldex oil where present,
-  HTTP oil is engine oil from the Kombi), and whether steering arrives both
-  ways as it does on Gen1.
+  and whether steering arrives both ways as it does on Gen1. (`oilTemp` is
+  settled: the packet's is Haldex oil, Gen4 only, and the OIL tile no longer
+  uses it. HTTP oil is engine oil from the Kombi.)
 
 The raw telemetry page (`x`) exists for exactly this: it shows every field
 raw, so a tester can report back without a laptop and without this agent.
@@ -94,7 +94,8 @@ running afterwards, and the trial logic handled it correctly in passing.
 
 Leading hypothesis: a supply sag. The panel and the WiFi share a rail with
 very little margin on a USB port, and the reset landed in the middle of
-association retries. The boot banner now prints `reset : <reason>`
+association retries. The other candidate has since been removed: until 0.4.2 a
+rejoin shut the WiFi driver down with ESP-NOW still running on top of it. The boot banner now prints `reset : <reason>`
 (power-on / software / PANIC / watchdog / BROWNOUT), so the next occurrence
 answers the question instead of prompting another guess. Watch it on the car's
 supply, which is a different animal.
