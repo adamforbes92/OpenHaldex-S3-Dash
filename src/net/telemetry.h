@@ -3,7 +3,10 @@
 //
 // Two independent HTTP pollers run in a dedicated task on core 0:
 //
-//   GET /api/live        pollLiveMs (default 100 ms)   rpm, speed, throttle,
+// How often each one actually runs is decided by feed::livePeriodMs() and
+// dashPeriodMs(): these are the rates while HTTP is carrying the glass.
+//
+//   GET /api/live        pollLiveMs (default 1000 ms)  rpm, speed, throttle,
 //                                                      boost, coolantTemp,
 //                                                      oilTemp, lockTarget,
 //                                                      lockActual

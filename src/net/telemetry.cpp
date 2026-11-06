@@ -15,6 +15,7 @@
 
 #include "app/config.h"
 #include "app/ota.h"
+#include "net/datafeed.h"
 #include "net/ohx_now.h"
 
 namespace telemetry {
@@ -407,8 +408,11 @@ void netTask(void *) {
   // Let USB enumeration and the panel come up first.
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  uint32_t nextLive = 0;
-  uint32_t nextDash = 0;
+  uint32_t lastLive = 0;
+  uint32_t lastDash = 0;
+  uint32_t lastPlan = 0;
+  uint32_t livePeriod = cfg::get().pollLiveMs;
+  uint32_t dashPeriod = cfg::get().pollDashMs;
 
   for (;;) {
     if (!wifiEnsureConnected()) {
@@ -435,13 +439,22 @@ void netTask(void *) {
 
     const uint32_t now = millis();
 
-    if ((int32_t)(now - nextLive) >= 0) {
-      pollLive();
-      nextLive = millis() + cfg::get().pollLiveMs;
+    // How often each request is worth making changes as the packets and the CAN
+    // relay come and go. Measured from the last request rather than scheduled
+    // ahead, so when the packets stop the HTTP fallback starts straight away
+    // instead of waiting out a slow period.
+    if ((uint32_t)(now - lastPlan) >= 100) {
+      lastPlan = now;
+      livePeriod = feed::livePeriodMs();
+      dashPeriod = feed::dashPeriodMs();
     }
-    if ((int32_t)(now - nextDash) >= 0) {
+    if (livePeriod != 0 && (uint32_t)(now - lastLive) >= livePeriod) {
+      pollLive();
+      lastLive = millis();
+    }
+    if (dashPeriod != 0 && (uint32_t)(now - lastDash) >= dashPeriod) {
       pollDash();
-      nextDash = millis() + cfg::get().pollDashMs;
+      lastDash = millis();
     }
 
     const bool up = (WiFi.status() == WL_CONNECTED);
