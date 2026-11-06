@@ -360,7 +360,7 @@ at all:
 3. Open the address shown on the dash's SETTINGS page, under **UPDATE**:
    `http://192.168.1.203/` (or `http://ohx-dash.local/`).
 4. Choose the file and press **Upload and reboot**. It takes about 15 s for
-   the ~1.6 MB image, and the page reports the version, the slot and how many
+   the ~1.8 MB image, and the page reports the version, the slot and how many
    bytes went in.
 
 Both addresses work because the dash takes a **static** address after the
@@ -872,8 +872,8 @@ Next: [TODO.md](TODO.md) — what is deliberately not built yet, and why.
 Build result:
 
 ```
-RAM:   155 028 / 327 680 B   (47.3%)   <- 96 KB of that is LVGL's own heap
-Flash: 1 675 258 / 1 966 080 B (85.2%) <- of the 1.875 MB OTA slot
+RAM:   164 060 / 327 680 B   (50.1%)   <- 96 KB of that is LVGL's own heap
+Flash: 1 782 102 / 1 966 080 B (90.6%) <- of the 1.875 MB OTA slot
 ```
 
 ### Memory, exactly
